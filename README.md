@@ -144,7 +144,7 @@ python examples/retrieval_demo.py
 ```
 
 The demo writes local SQLite and FAISS data under `.data/`. The first narrative
-embedding may download the configured Sentence Transformers model. Production ingestion
+embedding may download the configured Model2Vec model. Production ingestion
 should supply normalized `FinancialFact` and `DocumentChunk` records from the
 upstream PDF/XLSX/CSV parsers; this package intentionally does not duplicate them.
 

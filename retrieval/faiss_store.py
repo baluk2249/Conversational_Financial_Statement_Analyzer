@@ -24,21 +24,21 @@ class TextEmbedder(Protocol):
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]: ...
 
 
-class SentenceTransformerEmbedder:
-    """Lazy adapter for a local Sentence Transformers embedding model."""
+class Model2VecEmbedder:
+    """Lazy adapter for static embeddings that do not require PyTorch or ONNX."""
 
-    def __init__(self, model_name: str = "sentence-transformers/all-MiniLM-L6-v2") -> None:
+    def __init__(self, model_name: str = "minishlab/potion-base-8M") -> None:
         try:
-            from sentence_transformers import SentenceTransformer
+            from model2vec import StaticModel
 
-            self._model = SentenceTransformer(model_name)
+            self._model = StaticModel.from_pretrained(model_name)
         except Exception as exc:
             raise NarrativeStoreError(
-                "Install the 'semantic' extra to use the default Sentence Transformers embedder"
+                "Install the 'semantic' extra and check model access to use the default Model2Vec embedder"
             ) from exc
 
     def encode(self, texts: Sequence[str]) -> NDArray[np.float32]:
-        vectors = self._model.encode(list(texts), convert_to_numpy=True, normalize_embeddings=True)
+        vectors = self._model.encode(list(texts))
         return np.asarray(vectors, dtype=np.float32)
 
 
@@ -49,9 +49,9 @@ class FaissNarrativeStore:
         self,
         persist_directory: str | Path | None = None,
         embedder: TextEmbedder | None = None,
-        model_name: str = "sentence-transformers/all-MiniLM-L6-v2",
+        model_name: str = "minishlab/potion-base-8M",
     ) -> None:
-        self.embedder = embedder or SentenceTransformerEmbedder(model_name)
+        self.embedder = embedder or Model2VecEmbedder(model_name)
         self.persist_directory = Path(persist_directory) if persist_directory else None
         self._chunks: dict[str, DocumentChunk] = {}
         self._vectors: dict[str, NDArray[np.float32]] = {}
