@@ -52,7 +52,7 @@ it, and should be qualified when required inputs are missing.
 
 ### 2. Retrieval / Grounding Agent
 
-Indexes normalized statements and narrative notes in ChromaDB. For each
+Indexes normalized statements and narrative notes in FAISS. For each
 question, it assembles a grounded context block containing relevant source
 text and computed facts. Numeric calculations should come from structured
 statement data and deterministic tools rather than language-model estimation.
@@ -119,6 +119,40 @@ The response workflow is:
 - Grounding and citation techniques.
 - Financial-ratio calculation and interpretation.
 - Cross-company comparison with period and currency checks.
+
+## Retrieval / Grounding MVP
+
+The retrieval package keeps exact financial facts in SQLite and narrative passages
+in a FAISS index. It does not use vector search for numeric facts or ask a language
+model to calculate ratios. Pydantic evidence contracts preserve source locators,
+and the ratio layer returns a formula version plus its input fact IDs. Trend and
+red-flag results are read through a provider interface so the owning agent can
+implement them independently.
+
+Requirements: Python 3.11 or newer. From the repository root, install the package
+and test dependencies, then run the test suite:
+
+```powershell
+python -m pip install -e ".[dev,semantic]"
+python -m pytest
+```
+
+Run the explicitly synthetic demonstration with:
+
+```powershell
+python examples/retrieval_demo.py
+```
+
+The demo writes local SQLite and FAISS data under `.data/`. The first narrative
+embedding may download the configured Sentence Transformers model. Production ingestion
+should supply normalized `FinancialFact` and `DocumentChunk` records from the
+upstream PDF/XLSX/CSV parsers; this package intentionally does not duplicate them.
+
+The main service is `RetrievalGroundingAgent.retrieve_context(question,
+company_id, period=None, top_k=5)`. Exact lookups are company- and period-scoped;
+unsupported figures produce `INSUFFICIENT_EVIDENCE`. Ratios not already stored
+are computed deterministically with `Decimal`, and incompatible currencies or
+units make the result unavailable with an explicit warning.
 
 ## Important note
 

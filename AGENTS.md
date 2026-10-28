@@ -72,7 +72,7 @@ Primary responsibilities:
 - identify the company, period, metrics, statement types, and narrative topics needed for a question;
 - retrieve exact financial values from the structured fact store;
 - retrieve existing deterministic calculations and trend/red-flag outputs;
-- retrieve relevant narrative notes and commentary from ChromaDB;
+- retrieve relevant narrative notes and commentary from a FAISS vector index;
 - filter retrieval by company and fiscal period before semantic ranking whenever applicable;
 - preserve source file and page/cell/paragraph locators;
 - build a stable grounded-context payload;
@@ -140,7 +140,7 @@ Financial statement normalisation
    v                          v
 Structured Financial Facts   Narrative Chunks
    |                          |
-   |                       ChromaDB
+  |                     FAISS Index
    |                          |
    +-------------+------------+
                  |
@@ -356,7 +356,7 @@ Use hybrid retrieval.
 - period deltas;
 - red-flag outputs.
 
-### ChromaDB semantic retrieval is intended for
+### FAISS semantic retrieval is intended for
 
 - management commentary;
 - notes to financial statements;
@@ -641,7 +641,7 @@ repo/
 
   retrieval/
     structured_store.py
-    chroma_store.py
+    faiss_store.py
     evidence_builder.py
 
   models/
@@ -687,7 +687,7 @@ Verify:
 - company filters prevent cross-company leakage;
 - period filters prevent cross-period leakage;
 - exact facts come from the structured store;
-- ChromaDB retrieves relevant narrative chunks;
+- FAISS retrieves relevant narrative chunks;
 - provenance remains intact through evidence assembly.
 
 ### Narrative tests

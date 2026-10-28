@@ -1,0 +1,1 @@
+"""Grounded evidence retrieval for financial statement analysis."""

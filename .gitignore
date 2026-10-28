@@ -4,3 +4,12 @@
 
 # LangGraph
 .langgraph_api/
+
+# Python environments and generated artifacts
+.venv/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+
+# Local synthetic demo data
+.data/

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "financial-statement-analyzer"
+version = "0.1.0"
+description = "Grounded retrieval services for financial statement analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "faiss-cpu>=1.8,<2",
+    "numpy>=1.26,<3",
+    "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+semantic = ["sentence-transformers>=3.0,<6"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["agents*", "models*", "retrieval*", "finance*"]

@@ -1,0 +1,1 @@
+"""Storage adapters used by evidence retrieval."""
