@@ -1,5 +1,5 @@
 """Deterministic financial calculations."""
 
-from finance.ratios import RatioCalculator
+from finance.ratios import RatioCalculator, calculate_ratio
 
-__all__ = ["RatioCalculator"]
+__all__ = ["RatioCalculator", "calculate_ratio"]

@@ -120,6 +120,9 @@ class ComputedMetric(FinancialModel):
     currency: str | None = None
     unit: str | None = None
     warnings: list[str] = Field(default_factory=list)
+    period_start: date | None = None
+    period_end: date | None = None
+    fiscal_year_end: date | None = None
 
 
 class TrendResult(FinancialModel):
@@ -128,21 +131,26 @@ class TrendResult(FinancialModel):
     metric_name: str
     from_period: str
     to_period: str
-    from_value: Decimal
-    to_value: Decimal
-    delta: Decimal
+    from_value: Decimal | None = None
+    to_value: Decimal | None = None
+    delta: Decimal | None = None
     supporting_refs: list[str] = Field(default_factory=list)
+    absolute_delta: Decimal | None = None
+    percentage_delta: Decimal | None = None
+    quality_status: Literal["VALID", "INSUFFICIENT_EVIDENCE", "INCOMPATIBLE_INPUTS"] = "VALID"
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RedFlagResult(FinancialModel):
     flag_id: str
     company_id: str
     flag_type: str
-    status: str
+    status: Literal["TRIGGERED", "NOT_TRIGGERED", "INSUFFICIENT_EVIDENCE", "NOT_APPLICABLE"]
     rule_version: str
     period: str | None = None
     supporting_refs: list[str] = Field(default_factory=list)
     explanation_code: str | None = None
+    warnings: list[str] = Field(default_factory=list)
 
 
 class InsufficientEvidence(FinancialModel):
