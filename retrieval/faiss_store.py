@@ -12,11 +12,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from models.schemas import DocumentChunk
+from retrieval.interfaces import NarrativeStoreUnavailableError
 
 logger = logging.getLogger(__name__)
 
 
-class NarrativeStoreError(RuntimeError):
+class NarrativeStoreError(NarrativeStoreUnavailableError):
     """Raised when narrative evidence cannot be indexed, persisted, or searched."""
 
 

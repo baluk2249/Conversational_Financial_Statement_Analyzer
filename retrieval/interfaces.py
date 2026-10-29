@@ -25,6 +25,10 @@ class NarrativeVectorStore(Protocol):
     def search(self, query: str, company_id: str, period: str | None = None, document_type: str | None = None, top_k: int = 5) -> list[DocumentChunk]: ...
 
 
+class NarrativeStoreUnavailableError(RuntimeError):
+    """Raised when narrative indexing or retrieval is temporarily unavailable."""
+
+
 class TrendAndRedFlagProvider(Protocol):
     def get_trends(self, company_id: str, metrics: Sequence[str] | None = None, periods: Sequence[str] | None = None) -> list[TrendResult]: ...
     def get_red_flags(self, company_id: str, periods: Sequence[str] | None = None) -> list[RedFlagResult]: ...

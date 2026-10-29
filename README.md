@@ -149,24 +149,51 @@ and the ratio layer returns a formula version plus its input fact IDs. Trend and
 red-flag results are read through a provider interface so the owning agent can
 implement them independently.
 
-Requirements: Python 3.11 or newer. From the repository root, install the package
-and test dependencies, then run the test suite:
+Requirements: Python 3.11 or newer. From the repository root, install the
+application, semantic retrieval, and test dependencies:
 
 ```powershell
-python -m pip install -e ".[dev,semantic]"
-python -m pytest
+python -m pip install -e ".[app,dev,semantic]"
 ```
 
-Run the explicitly synthetic demonstration with:
+Start the API and Streamlit UI in separate terminals:
 
 ```powershell
+uvicorn api.main:app --reload
+streamlit run frontend/streamlit_app.py
+```
+
+The API persists structured facts in SQLite and narrative embeddings in FAISS.
+By default, local data is stored under `.data/`; set `FINANCIAL_DATABASE_PATH`,
+`FAISS_INDEX_DIRECTORY`, and `FASTAPI_BASE_URL` to override the development
+locations. The first narrative indexing/search may download the configured
+Model2Vec model. OpenAI generation is optional; set `OPENAI_API_KEY` and, if
+needed, `OPENAI_BASE_URL` and `OPENAI_MODEL` to enable it. Without a configured
+provider the existing deterministic, citation-validated fallback is used.
+The existing intent router is executed as a LangGraph workflow; exact/ratio
+requests and comparison requests follow separate paths.
+
+CSV and XLSX uploads accept normalized rows with `company` or `company_id`,
+`fiscal_year`, `line_item`, and `value` columns. Optional columns include
+`statement_type`, `currency`, `unit`, `period_start`, `period_end`,
+`fiscal_year_end`, `narrative`, and `section`. Only supported line-item names
+are normalized into structured facts. PDF uploads preserve extracted page text
+as FAISS narrative chunks and extract table grids for explicitly identified
+income statements, balance sheets, and cash flow statements. Supported rows and
+period columns are normalized into the shared financial-fact schema and
+structured store, with page and table-row provenance. Tables without a
+recognized statement heading or unambiguous period/value columns are not
+normalized. PDF table extraction is layout-dependent, so verify uploaded
+statements and warnings rather than assuming every annual-report layout was
+parsed successfully. Exact figures remain in the structured store; FAISS
+continues to index narrative page text only.
+
+Run the tests and the synthetic demo with:
+
+```powershell
+python -m pytest
 python examples/retrieval_demo.py
 ```
-
-The demo writes local SQLite and FAISS data under `.data/`. The first narrative
-embedding may download the configured Model2Vec model. Production ingestion
-should supply normalized `FinancialFact` and `DocumentChunk` records from the
-upstream PDF/XLSX/CSV parsers; this package intentionally does not duplicate them.
 
 The main service is `RetrievalGroundingAgent.retrieve_context(question,
 company_id, period=None, top_k=5)`. Exact lookups are company- and period-scoped;

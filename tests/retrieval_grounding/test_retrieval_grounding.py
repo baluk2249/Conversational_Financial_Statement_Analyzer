@@ -15,6 +15,7 @@ from models.schemas import (
     TrendResult,
 )
 from retrieval.faiss_store import FaissNarrativeStore
+from retrieval.interfaces import NarrativeStoreUnavailableError
 from retrieval.structured_store import SQLiteFinancialStore
 
 
@@ -133,6 +134,21 @@ def test_missing_fact_returns_insufficient_evidence(store: SQLiteFinancialStore)
     assert result.insufficient_evidence.requested_item == "EBITDA"
     assert result.insufficient_evidence.reason_code == "REQUIRED_FACTS_MISSING"
     assert result.facts == []
+
+
+def test_faiss_failure_preserves_structured_evidence(store: SQLiteFinancialStore) -> None:
+    class UnavailableNarrativeStore:
+        def search(self, *args, **kwargs):
+            raise NarrativeStoreUnavailableError("index unavailable")
+
+    store.add_fact(make_fact("abc", "revenue", "FY2025", "120"))
+    result = RetrievalGroundingAgent(
+        store, narrative_store=UnavailableNarrativeStore()
+    ).retrieve_context("Why is revenue reported?", "abc")
+
+    assert result.status == "OK"
+    assert result.facts[0].value == Decimal("120")
+    assert "NARRATIVE_RETRIEVAL_UNAVAILABLE" in result.warnings
 
 
 def test_trends_and_flags_are_loaded_from_structured_provider(store: SQLiteFinancialStore) -> None:

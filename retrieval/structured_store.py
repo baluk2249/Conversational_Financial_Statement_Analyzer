@@ -81,6 +81,15 @@ class SQLiteFinancialStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_flags_lookup
                         ON red_flags(company_id, flag_type);
+                    CREATE TABLE IF NOT EXISTS companies (
+                        company_id TEXT PRIMARY KEY,
+                        company_name TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS company_periods (
+                        company_id TEXT NOT NULL,
+                        period TEXT NOT NULL,
+                        PRIMARY KEY (company_id, period)
+                    );
                     """
                 )
                 columns = {row["name"] for row in connection.execute("PRAGMA table_info(financial_facts)")}
@@ -198,6 +207,79 @@ class SQLiteFinancialStore:
         with self._connect() as connection:
             rows = connection.execute(sql, params).fetchall()
         return [RedFlagResult.model_validate_json(row["payload"]) for row in rows]
+
+    def list_companies(self) -> list[dict[str, str]]:
+        """Return companies represented by stored source facts."""
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT company_id, company_name FROM companies "
+                    "ORDER BY company_id"
+                ).fetchall()
+                fact_rows = connection.execute(
+                    "SELECT company_id, payload FROM financial_facts "
+                    "GROUP BY company_id ORDER BY company_id"
+                ).fetchall()
+            companies = {row["company_id"]: row["company_name"] for row in rows}
+            for row in fact_rows:
+                fact = FinancialFact.model_validate_json(row["payload"])
+                companies.setdefault(row["company_id"], fact.company_name)
+            return [
+                {"company_id": company_id, "company_name": company_name}
+                for company_id, company_name in companies.items()
+            ]
+        except (sqlite3.Error, ValueError) as exc:
+            raise StructuredStoreError("Could not list companies") from exc
+
+    def get_periods(self, company_id: str) -> list[str]:
+        """Return distinct fiscal periods for a company."""
+        try:
+            with self._connect() as connection:
+                rows = connection.execute(
+                    "SELECT DISTINCT fiscal_year FROM financial_facts "
+                    "WHERE company_id = ?",
+                    (company_id,),
+                ).fetchall()
+                registered_rows = connection.execute(
+                    "SELECT period FROM company_periods WHERE company_id = ?",
+                    (company_id,),
+                ).fetchall()
+            return sorted(
+                {row["fiscal_year"] for row in rows}
+                | {row["period"] for row in registered_rows}
+            )
+        except sqlite3.Error as exc:
+            raise StructuredStoreError("Could not list company periods") from exc
+
+    def register_company(
+        self, company_id: str, company_name: str, periods: Sequence[str] = ()
+    ) -> None:
+        """Register identities and periods even for narrative-only documents."""
+        try:
+            with self._connect() as connection:
+                connection.execute(
+                    "INSERT OR REPLACE INTO companies (company_id, company_name) "
+                    "VALUES (?, ?)",
+                    (company_id, company_name),
+                )
+                connection.executemany(
+                    "INSERT OR IGNORE INTO company_periods (company_id, period) "
+                    "VALUES (?, ?)",
+                    [(company_id, period) for period in periods],
+                )
+        except sqlite3.Error as exc:
+            raise StructuredStoreError(
+                f"Could not register company {company_id}"
+            ) from exc
+
+    def check_health(self) -> bool:
+        """Verify the structured database can execute a simple read."""
+        try:
+            with self._connect() as connection:
+                connection.execute("SELECT 1").fetchone()
+            return True
+        except sqlite3.Error as exc:
+            raise StructuredStoreError("Structured store health check failed") from exc
 
     @staticmethod
     def _select_query(

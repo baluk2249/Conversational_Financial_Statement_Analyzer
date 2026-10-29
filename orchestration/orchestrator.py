@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Sequence
+from typing import TypedDict
 
 from agents.comparison import ComparisonAgent, ComparisonRequest
 from agents.narrative_qa.agent import NarrativeQAAgent
@@ -25,6 +26,12 @@ from orchestration.schemas import (
 logger = logging.getLogger(__name__)
 
 
+class _WorkflowState(TypedDict, total=False):
+    request: OrchestrationRequest
+    routed: RoutedQuestion
+    response: OrchestrationResponse
+
+
 class Orchestrator:
     """Route a question through only the evidence and agents it requires."""
 
@@ -42,16 +49,65 @@ class Orchestrator:
         self.comparison_agent = comparison_agent or ComparisonAgent()
         self.narrative_agent = narrative_agent or NarrativeQAAgent()
         self.question_router = question_router or QuestionRouter()
+        self._workflow = self._build_workflow()
 
     def answer(self, request: OrchestrationRequest) -> OrchestrationResponse:
+        state = self._workflow.invoke({"request": request})
+        response = state.get("response")
+        if response is None:
+            raise RuntimeError("The LangGraph workflow completed without a response")
+        return response
+
+    def _build_workflow(self):
+        from langgraph.graph import END, START, StateGraph
+
+        workflow = StateGraph(_WorkflowState)
+        workflow.add_node("route_question", self._route_question)
+        workflow.add_node("single_company", self._run_single_company)
+        workflow.add_node("comparison", self._run_comparison)
+        workflow.add_edge(START, "route_question")
+        workflow.add_conditional_edges(
+            "route_question",
+            lambda state: (
+                "comparison" if state["routed"].comparison else "single_company"
+            ),
+            {
+                "single_company": "single_company",
+                "comparison": "comparison",
+            },
+        )
+        workflow.add_edge("single_company", END)
+        workflow.add_edge("comparison", END)
+        return workflow.compile()
+
+    def _route_question(self, state: _WorkflowState) -> _WorkflowState:
+        request = state["request"]
         routed = self.question_router.route(
             request.question,
             request.period,
             has_comparison_company=request.comparison_company_id is not None,
         )
-        if routed.comparison:
-            return self._answer_comparison(request, routed)
-        return self._answer_single_company(request, routed)
+        return {"routed": routed}
+
+    def _run_single_company(self, state: _WorkflowState) -> _WorkflowState:
+        routed = state.get("routed")
+        if routed is None:
+            raise RuntimeError("The question router did not produce an intent")
+        return {
+            "response": self._answer_single_company(
+                state["request"], routed
+            )
+        }
+
+    def _run_comparison(self, state: _WorkflowState) -> _WorkflowState:
+        routed = state.get("routed")
+        if routed is None:
+            raise RuntimeError("The question router did not produce an intent")
+        return {
+            "response": self._answer_comparison(
+                state["request"], routed
+            )
+        }
 
     def _answer_single_company(
         self, request: OrchestrationRequest, routed: RoutedQuestion

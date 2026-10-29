@@ -15,6 +15,7 @@ from models.schemas import (
 )
 from retrieval.interfaces import (
     NarrativeVectorStore,
+    NarrativeStoreUnavailableError,
     StructuredFinancialStore,
     TrendAndRedFlagProvider,
 )
@@ -108,17 +109,25 @@ class RetrievalGroundingAgent:
                 and (requested_periods is None or flag.period in requested_periods)]
 
         narrative = []
+        narrative_unavailable = False
         if intent.needs_narrative and self.narrative_store is not None:
             search_periods = query_periods or [None]
             seen: set[str] = set()
             for search_period in search_periods:
-                chunks = self.narrative_store.search(
-                    query=question,
-                    company_id=company_id,
-                    period=search_period,
-                    document_type=intent.document_type,
-                    top_k=top_k,
-                )
+                try:
+                    chunks = self.narrative_store.search(
+                        query=question,
+                        company_id=company_id,
+                        period=search_period,
+                        document_type=intent.document_type,
+                        top_k=top_k,
+                    )
+                except NarrativeStoreUnavailableError:
+                    logger.exception(
+                        "Narrative retrieval unavailable; retaining structured evidence"
+                    )
+                    narrative_unavailable = True
+                    break
                 for chunk in chunks:
                     if chunk.company_id == company_id and chunk.chunk_id not in seen:
                         if search_period is None or chunk.period == search_period:
@@ -130,6 +139,9 @@ class RetrievalGroundingAgent:
             company_name = narrative[0].company_name
         output_periods = query_periods or available_periods
         missing_inputs = self._missing_inputs(intent.computed_metrics, computed)
+        if narrative_unavailable:
+            warnings.append("NARRATIVE_RETRIEVAL_UNAVAILABLE")
+            warnings = list(dict.fromkeys(warnings))
         no_requested_fact = bool(fact_metrics) and (
             not facts
             if include_all_financial_facts
