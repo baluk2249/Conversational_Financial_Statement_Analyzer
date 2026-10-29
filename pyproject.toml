@@ -23,7 +23,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["agents*", "models*", "retrieval*", "finance*", "config*"]
+include = ["agents*", "llm*", "models*", "retrieval*", "finance*", "config*"]
 
 [tool.setuptools.package-data]
 config = ["*.yaml"]

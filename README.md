@@ -198,6 +198,51 @@ Run the focused agent tests with:
 python -m pytest tests/trend_red_flag
 ```
 
+## Narrative & Q&A Agent
+
+`NarrativeQAAgent` consumes the shared `AnswerEvidence` model. It uses only
+company-scoped facts, calculated metrics, trends, red flags, narrative passages,
+and warnings in that bundle. Citations are built from source metadata and
+calculated metrics are cited through their input fact references. A post-
+generation validator rejects unsupported numeric claims, unresolved citations,
+and causal statements that are not supported by retrieved narrative evidence.
+
+The deterministic formatter handles exact facts, metrics, trends, red flags,
+and insufficient-evidence responses if no model is configured or a provider
+request fails. Forecast/estimate requests and comparison questions are refused
+deterministically: the current `AnswerEvidence` contract does not include
+verified comparison bundles or forecast inputs.
+
+Run the synthetic example (no API key or network request required):
+
+```powershell
+python examples/narrative_qa_demo.py
+```
+
+For optional generation, inject an `LLMClient`. An OpenAI-compatible adapter
+is included and reads credentials only from environment variables:
+
+```python
+import os
+
+from agents.narrative_qa import NarrativeQAAgent
+from llm.providers import OpenAICompatibleClient
+
+agent = NarrativeQAAgent(
+    llm_client=OpenAICompatibleClient.from_environment()
+)
+answer = agent.answer(answer_evidence)
+```
+
+Set `OPENAI_API_KEY`; optionally set `OPENAI_BASE_URL` and `OPENAI_MODEL`.
+Configuring this adapter sends the targeted evidence block to that endpoint.
+Without an explicitly supplied client the agent uses local deterministic
+formatting and makes no network requests. Validate the project changes with:
+
+```powershell
+python -m pytest tests/narrative_qa
+```
+
 ## Important note
 
 This tool is intended to support financial-statement analysis and education. Its
