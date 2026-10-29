@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 
 from agents.narrative_qa.citation_builder import CitationBuilder
+from agents.comparison.schemas import ComparisonResult
 from models.schemas import AnswerEvidence, ComputedMetric, TrendResult
 
 CITATION_PATTERN = re.compile(r"\[[^\[\]]+\]")
@@ -90,6 +91,66 @@ class CitationValidator:
                 )
 
         errors.extend(self._causal_claim_errors(answer, evidence))
+        return ValidationResult(not errors, errors)
+
+    def validate_comparison(
+        self, answer: str, result: ComparisonResult
+    ) -> ValidationResult:
+        """Validate comparison claims against each metric's source lineage."""
+        if not answer.strip():
+            return ValidationResult(False, ["The answer is empty"])
+
+        citation_values: dict[str, set[Decimal]] = {}
+        if result.status != "INSUFFICIENT_EVIDENCE":
+            for metric in result.metrics:
+                for evidence in (metric.company_a, metric.company_b):
+                    if evidence is None:
+                        continue
+                    supported_values = {evidence.value}
+                    if evidence.normalized_value is not None:
+                        supported_values.add(evidence.normalized_value)
+                    if evidence.display_unit == "percent":
+                        supported_values.add(evidence.value * Decimal("100"))
+                    for source in evidence.source_references:
+                        citation_values.setdefault(source.citation, set()).update(
+                            supported_values
+                        )
+
+        errors: list[str] = []
+        citations_in_answer: list[tuple[str, int, int]] = []
+        for match in CITATION_PATTERN.finditer(answer):
+            citation = match.group(0)
+            if citation not in citation_values:
+                if "|" in citation:
+                    errors.append(f"Unresolvable citation: {citation}")
+                continue
+            citations_in_answer.append((citation, match.start(), match.end()))
+
+        scrubbed = CITATION_PATTERN.sub("", answer)
+        for match in NUMBER_PATTERN.finditer(scrubbed):
+            value = _parse_number(match.group(0))
+            if value is None:
+                errors.append(f"Unrecognized numeric claim: {match.group(0)}")
+                continue
+            original_start = _scrubbed_to_original_index(answer, match.start())
+            nearby_start = max(0, original_start - 180)
+            nearby_end = min(len(answer), original_start + 180)
+            nearby_citations = [
+                citation
+                for citation, start, end in citations_in_answer
+                if start < nearby_end and end > nearby_start
+            ]
+            if result.status == "INSUFFICIENT_EVIDENCE" or not any(
+                value in citation_values[citation] for citation in nearby_citations
+            ):
+                errors.append(
+                    f"Numeric claim {match.group(0)!r} is not grounded by a "
+                    "nearby, supporting comparison citation"
+                )
+        if CAUSAL_PATTERN.search(answer):
+            errors.append(
+                "Causal claims are not supported by comparison evidence"
+            )
         return ValidationResult(not errors, errors)
 
     def _citation_values(

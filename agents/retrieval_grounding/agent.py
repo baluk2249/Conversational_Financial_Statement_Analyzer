@@ -7,6 +7,7 @@ import re
 from collections.abc import Sequence
 
 from finance.ratios import RatioCalculator
+from agents.retrieval_grounding.config import METRIC_ALIASES
 from models.schemas import (
     AnswerEvidence,
     ComputedMetric,
@@ -40,20 +41,32 @@ class RetrievalGroundingAgent:
         self.ratio_calculator = ratio_calculator or RatioCalculator(structured_store)
 
     def retrieve_context(
-        self, question: str, company_id: str, period: str | None = None, top_k: int = 5,
+        self,
+        question: str,
+        company_id: str,
+        period: str | None = None,
+        top_k: int = 5,
+        *,
+        include_all_financial_facts: bool = False,
     ) -> AnswerEvidence:
         intent = self.query_parser.parse(question, period)
         requested_periods = list(intent.periods) or None
         query_periods = self._include_prior_period(requested_periods) if intent.wants_trends else requested_periods
+        fact_metrics = list(intent.fact_metrics)
+        if include_all_financial_facts:
+            fact_metrics = list(dict.fromkeys([*fact_metrics, *METRIC_ALIASES]))
+        statement_filter = (
+            None if include_all_financial_facts else intent.statement_type
+        )
         facts = self.structured_store.get_facts(
-            company_id, intent.fact_metrics, query_periods, intent.statement_type,
+            company_id, fact_metrics, query_periods, statement_filter,
         )
         facts = [
             fact for fact in facts
             if fact.company_id == company_id
-            and fact.canonical_line_item in intent.fact_metrics
+            and fact.canonical_line_item in fact_metrics
             and (query_periods is None or fact.fiscal_year in query_periods)
-            and (intent.statement_type is None or fact.statement_type == intent.statement_type)
+            and (statement_filter is None or fact.statement_type == statement_filter)
         ]
         available_periods = sorted({fact.fiscal_year for fact in facts})
         periods_for_metrics = query_periods
@@ -117,7 +130,11 @@ class RetrievalGroundingAgent:
             company_name = narrative[0].company_name
         output_periods = query_periods or available_periods
         missing_inputs = self._missing_inputs(intent.computed_metrics, computed)
-        no_requested_fact = bool(intent.fact_metrics) and not (facts or computed or narrative)
+        no_requested_fact = bool(fact_metrics) and (
+            not facts
+            if include_all_financial_facts
+            else not (facts or computed or narrative)
+        )
         unsupported_exact = bool(intent.requested_item and not intent.needs_narrative and not facts and not computed)
         qualitative_empty = intent.needs_narrative and not (facts or computed or trends or red_flags or narrative)
         unavailable_requested_metric = any(
@@ -137,7 +154,7 @@ class RetrievalGroundingAgent:
             insufficient_detail = InsufficientEvidence(
                 requested_item=requested_item,
                 missing_inputs=(
-                    missing_inputs or list(intent.fact_metrics)
+                    missing_inputs or fact_metrics
                     if (no_requested_fact or unsupported_exact or unavailable_requested_metric)
                     else []
                 ),

@@ -43,7 +43,13 @@ class DeterministicQueryParser:
 
         wants_red_flags = any(term in normalized for term in ("red flag", "warning sign", "risk flag"))
         wants_trends = any(term in normalized for term in ("trend", "declin", "increas", "decreas", "change", "over time", "period-over-period"))
-        qualitative = any(term in normalized for term in ("why", "explain", "commentary", "reason", "cause", "discuss"))
+        qualitative = any(
+            term in normalized
+            for term in (
+                "why", "explain", "commentary", "reason", "cause", "discuss",
+                "summary", "summarize", "summarise", "overview",
+            )
+        )
         if wants_red_flags:
             wants_trends = True
 

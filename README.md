@@ -15,6 +15,26 @@ Make financial statements easier to explore and understand by combining
 document retrieval, deterministic calculations, and grounded conversational
 answers.
 
+## Technology stack
+
+The target application stack is:
+
+| Area | Technology |
+| --- | --- |
+| Frontend | Streamlit |
+| Backend API | FastAPI |
+| Agent workflow | LangGraph |
+| RAG utilities | LangChain where useful |
+| Vector database | FAISS |
+| Structured database | SQLite initially |
+| Models and schemas | Pydantic |
+| Calculations | Python `Decimal` and pandas |
+| Testing | pytest |
+| LLM | OpenAI |
+
+This describes the target stack; not every component is implemented in the
+current MVP.
+
 ## What it does
 
 - Ingests company P&L, balance sheet, and cash flow statements across periods.
@@ -210,8 +230,9 @@ and causal statements that are not supported by retrieved narrative evidence.
 The deterministic formatter handles exact facts, metrics, trends, red flags,
 and insufficient-evidence responses if no model is configured or a provider
 request fails. Forecast/estimate requests and comparison questions are refused
-deterministically: the current `AnswerEvidence` contract does not include
-verified comparison bundles or forecast inputs.
+deterministically by the standalone `answer` method. Application comparisons
+use `answer_comparison`, which consumes verified comparison-agent results,
+keeps each company's citations separate, and validates every numeric claim.
 
 Run the synthetic example (no API key or network request required):
 
@@ -289,6 +310,57 @@ Run the comparison tests with:
 ```powershell
 python -m pytest tests/comparison
 ```
+
+## Application orchestration
+
+`Orchestrator` routes each `OrchestrationRequest` to the minimum component set:
+exact lookups use retrieval; ratios add the deterministic retrieval ratio
+calculator; trends and red-flag questions add `TrendRedFlagAgent`; comparisons
+retrieve two independent company evidence bundles before invoking
+`ComparisonAgent`. The final response includes the routed intent, status,
+evidence bundles, comparison result when applicable, and citation-validation
+status.
+
+Comparison requests provide both company IDs explicitly. A question routed to
+comparison without a second company ID raises `OrchestrationInputError`.
+Missing upstream evidence is propagated and does not invoke model generation.
+For broad red-flag and comparison questions, retrieval can be asked for the
+complete supported line-item set; the question router never calculates
+financial values.
+
+```python
+from agents.retrieval_grounding.agent import RetrievalGroundingAgent
+from orchestration import OrchestrationRequest, Orchestrator
+from retrieval.structured_store import SQLiteFinancialStore
+
+orchestrator = Orchestrator(
+    RetrievalGroundingAgent(SQLiteFinancialStore("financial-data.sqlite3"))
+)
+response = orchestrator.answer(
+    OrchestrationRequest(
+        question="What was the current ratio in FY2025?",
+        company_id="abc-ltd",
+    )
+)
+print(response.answer)
+```
+
+Run the local synthetic, end-to-end workflow without an API key:
+
+```powershell
+python examples/orchestration_demo.py
+```
+
+Run the focused orchestration tests:
+
+```powershell
+python -m pytest tests/orchestration
+```
+
+The orchestrator emits structured log fields for request and company IDs,
+intent, retrieved fact IDs, calculated metric IDs, red-flag IDs, warning codes,
+and citation-validation outcome. It does not log prompts or provider
+credentials.
 
 ## Important note
 

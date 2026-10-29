@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from decimal import Decimal
 
+from agents.comparison.schemas import ComparisonEvidence, ComparisonResult
 from agents.narrative_qa.citation_builder import CitationBuilder
 from models.schemas import (
     AnswerEvidence,
@@ -71,6 +72,70 @@ class SafeFallbackFormatter:
                 "financial information."
             )
         return append_warnings(answer, evidence)
+
+    def format_comparison(
+        self,
+        result: ComparisonResult,
+        *,
+        upstream_insufficient: bool = False,
+    ) -> str:
+        if upstream_insufficient or result.status == "INSUFFICIENT_EVIDENCE":
+            answer = (
+                "Required company evidence is missing. The comparison cannot "
+                "be established; I will not estimate."
+            )
+        else:
+            statements: list[str] = []
+            for metric in result.metrics:
+                if metric.comparison_status == "COMPARABLE":
+                    left = self._format_comparison_value(metric.company_a)
+                    right = self._format_comparison_value(metric.company_b)
+                    if left is not None and right is not None:
+                        statements.append(
+                            f"{_label(metric.metric_name)}: {left}; versus {right}."
+                        )
+                elif metric.comparison_status == "INCOMPARABLE":
+                    statements.append(
+                        f"{_label(metric.metric_name)} values are not comparable."
+                    )
+                else:
+                    statements.append(
+                        f"{_label(metric.metric_name)} cannot be compared; "
+                        "required evidence is missing."
+                    )
+            answer = " ".join(statements) or (
+                "The available evidence does not establish a comparison."
+            )
+
+        warning_codes = list(dict.fromkeys(
+            warning.code for warning in result.warnings
+        ))
+        if warning_codes:
+            answer = f"{answer.rstrip()} Comparison warnings: {', '.join(warning_codes)}."
+        return answer
+
+    @staticmethod
+    def _format_comparison_value(
+        evidence: ComparisonEvidence | None,
+    ) -> str | None:
+        if evidence is None or not evidence.source_references:
+            return None
+        value = evidence.value
+        display_unit = evidence.display_unit or evidence.unit
+        if display_unit == "percent":
+            formatted_value = f"{value * Decimal('100')}%"
+        else:
+            formatted_value = f"{value}"
+        context = " ".join(
+            value for value in (evidence.currency, evidence.unit) if value
+        )
+        citations = " ".join(
+            source.citation for source in evidence.source_references
+        )
+        label = evidence.company_name or evidence.company_id
+        return " ".join(
+            part for part in (label, formatted_value, context, citations) if part
+        )
 
     def _insufficient(self, evidence: AnswerEvidence) -> str:
         period = ""
@@ -156,7 +221,7 @@ class SafeFallbackFormatter:
         if flag.status == "INSUFFICIENT_EVIDENCE":
             return (
                 f"The {_label(flag.flag_type).lower()} check is inconclusive "
-                f"because required evidence is unavailable "
+                f"; required evidence is unavailable "
                 f"(rule: {flag.rule_version}).{citation_text}"
             )
         return ""

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from agents.comparison.schemas import ComparisonResult
 from agents.narrative_qa.citation_validator import CitationValidator
 from agents.narrative_qa.formatters import (
     SafeFallbackFormatter,
@@ -52,7 +53,6 @@ class NarrativeQAAgent:
             or self.llm_client is None
         ):
             return self._validated_fallback(evidence)
-
         system_prompt, user_prompt = self.prompt_builder.build(evidence)
         try:
             draft = self.llm_client.generate(system_prompt, user_prompt)
@@ -61,7 +61,6 @@ class NarrativeQAAgent:
                 "Narrative provider failed; using deterministic evidence fallback"
             )
             return self._validated_fallback(evidence)
-
         validation = self.citation_validator.validate(draft, evidence)
         if validation.valid:
             return draft
@@ -70,6 +69,38 @@ class NarrativeQAAgent:
         )
         return self._validated_fallback(evidence)
 
+    def answer_comparison(
+        self,
+        result: ComparisonResult,
+        *,
+        upstream_insufficient: bool = False,
+    ) -> str:
+        """Explain verified comparison output without weakening refusal rules."""
+        if upstream_insufficient or result.status == "INSUFFICIENT_EVIDENCE":
+            return self._validated_comparison_fallback(
+                result, upstream_insufficient=upstream_insufficient
+            )
+        if self.llm_client is None:
+            return self._validated_comparison_fallback(result)
+
+        system_prompt, user_prompt = self.prompt_builder.build_comparison(result)
+        try:
+            draft = self.llm_client.generate(system_prompt, user_prompt)
+        except LLMProviderError:
+            logger.exception(
+                "Narrative provider failed; using deterministic comparison fallback"
+            )
+            return self._validated_comparison_fallback(result)
+
+        validation = self.citation_validator.validate_comparison(draft, result)
+        if validation.valid:
+            return draft
+        logger.warning(
+            "Rejected ungrounded comparison answer: %s",
+            "; ".join(validation.errors),
+        )
+        return self._validated_comparison_fallback(result)
+
     def _validated_fallback(self, evidence: AnswerEvidence) -> str:
         answer = self.fallback_formatter.format(evidence)
         validation = self.citation_validator.validate(answer, evidence)
@@ -77,5 +108,22 @@ class NarrativeQAAgent:
             raise NarrativeAnswerError(
                 "The deterministic fallback did not pass evidence validation: "
                 + "; ".join(validation.errors)
+            )
+        return answer
+
+    def _validated_comparison_fallback(
+        self,
+        result: ComparisonResult,
+        *,
+        upstream_insufficient: bool = False,
+    ) -> str:
+        answer = self.fallback_formatter.format_comparison(
+            result, upstream_insufficient=upstream_insufficient
+        )
+        validation = self.citation_validator.validate_comparison(answer, result)
+        if not validation.valid:
+            raise NarrativeAnswerError(
+                "The deterministic comparison fallback did not pass evidence "
+                "validation: " + "; ".join(validation.errors)
             )
         return answer
