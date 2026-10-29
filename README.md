@@ -154,6 +154,50 @@ unsupported figures produce `INSUFFICIENT_EVIDENCE`. Ratios not already stored
 are computed deterministically with `Decimal`, and incompatible currencies or
 units make the result unavailable with an explicit warning.
 
+## Trend & Red Flag Agent
+
+The deterministic Trend & Red Flag Agent accepts shared `FinancialFact` records
+and optionally existing `ComputedMetric` records. It calculates supported
+liquidity, leverage, profitability, and efficiency ratios with `Decimal`, then
+compares adjacent periods and evaluates the six configured red-flag families.
+It does not use an LLM for formulas, period deltas, or rule decisions.
+
+```python
+from agents.trend_red_flag import TrendRedFlagAgent
+
+analysis = TrendRedFlagAgent().analyse(
+    company_id="abc-ltd",
+    facts=normalized_facts,
+    periods=["FY2024", "FY2025"],  # caller-provided chronological order
+)
+```
+
+`analysis` returns the company-scoped source facts, formula-versioned metrics,
+trend results, and red flags. A trend's `supporting_refs` identify its computed
+metrics; those metrics identify their input fact IDs. Flags point to their
+supporting trend/metric IDs or, for the accrual and inventory detectors, the
+exact facts used. Metric and trend quality statuses expose missing or
+incompatible inputs instead of filling them with zero or assumed values.
+
+Rule versions and thresholds are loaded from
+[`config/red_flag_rules.yaml`](./config/red_flag_rules.yaml). The checked-in
+defaults are direction-only (`0` minimum adverse change), not industry
+benchmarks; tune those values in configuration for an explicitly selected
+policy. A missing threshold leaves the affected detector at
+`INSUFFICIENT_EVIDENCE`. Disabled detectors return `NOT_APPLICABLE`.
+
+Run the local synthetic example with:
+
+```powershell
+python examples/trend_red_flag_demo.py
+```
+
+Run the focused agent tests with:
+
+```powershell
+python -m pytest tests/trend_red_flag
+```
+
 ## Important note
 
 This tool is intended to support financial-statement analysis and education. Its

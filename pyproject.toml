@@ -11,6 +11,7 @@ dependencies = [
     "faiss-cpu>=1.8,<2",
     "numpy>=1.26,<3",
     "pydantic>=2.7,<3",
+    "pyyaml>=6,<7",
 ]
 
 [project.optional-dependencies]
@@ -22,4 +23,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.setuptools.packages.find]
-include = ["agents*", "models*", "retrieval*", "finance*"]
+include = ["agents*", "models*", "retrieval*", "finance*", "config*"]
+
+[tool.setuptools.package-data]
+config = ["*.yaml"]

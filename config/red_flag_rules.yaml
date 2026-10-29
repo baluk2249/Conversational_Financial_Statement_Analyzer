@@ -1,0 +1,37 @@
+# Direction-only defaults: any adverse change can trigger; these are not
+# industry benchmarks. Set explicit thresholds here for a deployment's policy.
+accrual_quality_gap:
+  rule_version: accrual_quality_gap_v1
+  enabled: true
+  parameters:
+    minimum_gap_ratio: "0"
+
+dso_climbing:
+  rule_version: dso_climbing_v1
+  enabled: true
+  parameters:
+    minimum_increase: "0"
+
+margin_compression:
+  rule_version: margin_compression_v1
+  enabled: true
+  parameters:
+    minimum_decline: "0"
+
+leverage_stress:
+  rule_version: leverage_stress_v1
+  enabled: true
+  parameters:
+    minimum_worsening: "0"
+
+inventory_build_up:
+  rule_version: inventory_build_up_v1
+  enabled: true
+  parameters:
+    minimum_growth_gap: "0"
+
+liquidity_deterioration:
+  rule_version: liquidity_deterioration_v1
+  enabled: true
+  parameters:
+    minimum_decline: "0"
