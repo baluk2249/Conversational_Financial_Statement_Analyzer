@@ -243,6 +243,53 @@ formatting and makes no network requests. Validate the project changes with:
 python -m pytest tests/narrative_qa
 ```
 
+## Comparison Agent
+
+`ComparisonAgent` accepts two separate shared `AnswerEvidence` bundles and
+compares only company-scoped facts or valid computed metrics. It validates
+metric/formula definitions, fiscal periods and year ends, currencies, and unit
+scales before producing a deterministic `company_b - company_a` difference.
+It reports the higher value only; it does not infer that a higher value is
+financially better.
+
+Currency is never converted. A currency mismatch blocks comparisons of
+monetary facts, but is surfaced as a warning while definition- and
+period-compatible ratios remain comparable. Known `absolute`, `thousands`, and
+`millions` scales are aligned deterministically for monetary comparisons while
+the original values, units, evidence IDs, and source references remain
+available in each result. Unknown or absent required metadata prevents a
+comparison. Missing evidence never produces a winner. Upstream warnings are
+preserved in structured result warnings. Trend questions (for example,
+"which margin improved more?") compare `TrendResult` deltas only when both
+periods, formula-versioned supporting metrics, and source references are
+present and aligned; otherwise the result carries an explicit warning.
+
+```python
+from agents.comparison import ComparisonAgent, ComparisonRequest
+
+result = ComparisonAgent().compare(
+    company_a_evidence,
+    company_b_evidence,
+    ComparisonRequest(
+        question="Compare liquidity.",
+        metric_names=["current_ratio", "quick_ratio"],
+        period="FY2025",
+    ),
+)
+```
+
+For a synthetic local demonstration with no API calls:
+
+```powershell
+python examples/comparison_demo.py
+```
+
+Run the comparison tests with:
+
+```powershell
+python -m pytest tests/comparison
+```
+
 ## Important note
 
 This tool is intended to support financial-statement analysis and education. Its
