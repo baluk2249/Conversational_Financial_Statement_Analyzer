@@ -60,11 +60,18 @@ class PDFTableExtractor:
                             }
                         ) or []
                         extraction_method = "pdfplumber_text"
-                    if not _has_period_header(raw_tables):
-                        word_table = _extract_word_aligned_table(page)
-                        if word_table and _has_period_header([word_table]):
-                            raw_tables = [word_table]
-                            extraction_method = "word_alignment"
+                    word_table = _extract_word_aligned_table(page)
+                    if (
+                        word_table
+                        and _has_period_header([word_table])
+                        and _populated_table_rows(word_table)
+                        > max(
+                            (_populated_table_rows(table) for table in raw_tables),
+                            default=0,
+                        )
+                    ):
+                        raw_tables = [word_table]
+                        extraction_method = "word_alignment"
                     seen_tables: set[tuple[tuple[str | None, ...], ...]] = set()
                     table_index = 0
                     for raw_rows in raw_tables:
@@ -129,7 +136,7 @@ _STATEMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "cash_flow_statement",
         re.compile(
-            r"\b(?:cash flow statement|statement of cash flows?|"
+            r"\b(?:cash\s*fl(?:o\s*)?w statement|statement of cash flows?|"
             r"consolidated statement of cash flows?)\b",
             re.IGNORECASE,
         ),
@@ -139,6 +146,13 @@ _STATEMENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 
 def detect_statement_type(text: str) -> str:
     """Classify only explicit supported statement headings; never numeric tables alone."""
+    text = re.sub(r"\s+", " ", text)
+    if re.search(
+        r"\bconsolidated\s+statement\s+of\s+cash\s+flows?\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "cash_flow_statement"
     matches = [
         statement_type
         for statement_type, pattern in _STATEMENT_PATTERNS
@@ -173,6 +187,13 @@ def _has_period_header(tables: list[list[list[Any]]]) -> bool:
             ):
                 return True
     return False
+
+
+def _populated_table_rows(rows: list[list[Any]]) -> int:
+    return sum(
+        sum(bool(cell is not None and str(cell).strip()) for cell in row) >= 3
+        for row in rows
+    )
 
 
 def _extract_word_aligned_table(page: Any) -> list[list[str]] | None:

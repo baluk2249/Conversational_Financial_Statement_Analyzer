@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
@@ -14,6 +14,7 @@ from application.service import (
     CompanyNotFoundError,
     PeriodNotFoundError,
 )
+from agents.narrative_qa.agent import NarrativeSummaryError
 from ingestion import (
     DocumentProcessingError,
     UnsupportedDocumentType,
@@ -40,6 +41,15 @@ class ComparisonAPIRequest(FinancialModel):
     period_b: str | None = None
 
 
+class RatioSummaryRequest(FinancialModel):
+    section: Literal["Liquidity", "Leverage", "Profitability", "Efficiency"]
+    period: str | None = None
+
+
+class PeriodSummaryRequest(FinancialModel):
+    period: str | None = None
+
+
 def create_app(service: AnalyzerService | None = None) -> FastAPI:
     analyzer = service or AnalyzerService.from_environment()
     app = FastAPI(
@@ -58,6 +68,13 @@ def create_app(service: AnalyzerService | None = None) -> FastAPI:
     async def unknown_period_handler(_request: Any, _exc: PeriodNotFoundError):
         del _request, _exc
         return _json_error(404, "The requested fiscal period was not found.")
+
+    @app.exception_handler(NarrativeSummaryError)
+    async def narrative_summary_error_handler(
+        _request: Any, exc: NarrativeSummaryError
+    ):
+        del _request
+        return _json_error(exc.status_code, str(exc))
 
     @app.exception_handler(UnsupportedDocumentType)
     async def unsupported_document_handler(
@@ -150,9 +167,33 @@ def create_app(service: AnalyzerService | None = None) -> FastAPI:
     ) -> dict[str, Any]:
         return analyzer.get_red_flags(company_id, period)
 
+    @app.post("/analysis/{company_id}/summaries/ratios")
+    def summarize_ratio_section(
+        company_id: str, request: RatioSummaryRequest
+    ) -> dict[str, Any]:
+        return analyzer.summarize_ratio_section(
+            company_id, request.section, request.period
+        )
+
+    @app.post("/analysis/{company_id}/summaries/red-flags")
+    def summarize_red_flags(
+        company_id: str, request: PeriodSummaryRequest
+    ) -> dict[str, Any]:
+        return analyzer.summarize_red_flags(company_id, request.period)
+
     @app.post("/comparison")
     def compare(request: ComparisonAPIRequest) -> dict[str, Any]:
         return analyzer.compare(
+            request.company_a,
+            request.company_b,
+            metrics=request.metrics,
+            period_a=request.period_a,
+            period_b=request.period_b,
+        )
+
+    @app.post("/comparison/summary")
+    def summarize_comparison(request: ComparisonAPIRequest) -> dict[str, Any]:
+        return analyzer.summarize_comparison(
             request.company_a,
             request.company_b,
             metrics=request.metrics,

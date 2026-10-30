@@ -25,12 +25,14 @@ class FinancialAnalyzerClient:
         base_url: str | None = None,
         *,
         timeout: float = 30,
+        upload_timeout: float = 180,
         client: httpx.Client | None = None,
     ) -> None:
         self.base_url = (
             base_url or os.environ.get("FASTAPI_BASE_URL", "http://127.0.0.1:8000")
         ).rstrip("/")
         self.timeout = timeout
+        self.upload_timeout = upload_timeout
         self._client = client or httpx.Client(timeout=timeout)
 
     def close(self) -> None:
@@ -70,6 +72,7 @@ class FinancialAnalyzerClient:
             "/documents/upload",
             files={"file": (filename, content)},
             data=fields,
+            timeout=self.upload_timeout,
         )
 
     def ask_question(
@@ -108,6 +111,27 @@ class FinancialAnalyzerClient:
             params={"period": period} if period else None,
         )
 
+    def summarize_ratio_section(
+        self,
+        company_id: str,
+        section: str,
+        period: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/analysis/{_path_segment(company_id)}/summaries/ratios",
+            json={"section": section, "period": period},
+        )
+
+    def summarize_red_flags(
+        self, company_id: str, period: str | None = None
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/analysis/{_path_segment(company_id)}/summaries/red-flags",
+            json={"period": period},
+        )
+
     def compare_companies(
         self,
         company_a: str,
@@ -128,12 +152,36 @@ class FinancialAnalyzerClient:
             },
         )
 
+    def summarize_comparison(
+        self,
+        company_a: str,
+        company_b: str,
+        metrics: list[str] | None = None,
+        period_a: str | None = None,
+        period_b: str | None = None,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            "/comparison/summary",
+            json={
+                "company_a": company_a,
+                "company_b": company_b,
+                "metrics": metrics,
+                "period_a": period_a,
+                "period_b": period_b,
+            },
+        )
+
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
         try:
             response = self._client.request(
                 method, f"{self.base_url}{path}", **kwargs
             )
-        except (httpx.ConnectError, httpx.TimeoutException) as exc:
+        except httpx.TimeoutException as exc:
+            raise AnalyzerAPIError(
+                "The analyzer API request timed out. The document may still be processing; check its status before retrying."
+            ) from exc
+        except httpx.ConnectError as exc:
             raise AnalyzerAPIError(
                 "The analyzer API is unavailable. Check that FastAPI is running."
             ) from exc
@@ -159,8 +207,15 @@ class FinancialAnalyzerClient:
 
 
 def _friendly_http_error(status_code: int, response: httpx.Response) -> str:
-    if status_code == 503:
-        return "A required analyzer service is unavailable."
+    if status_code in (502, 503):
+        try:
+            detail = response.json().get("detail")
+        except ValueError:
+            detail = None
+        if isinstance(detail, str) and detail:
+            return detail
+        if status_code == 503:
+            return "A required analyzer service is unavailable."
     if status_code >= 500:
         return "The analyzer encountered an unexpected server error."
     try:

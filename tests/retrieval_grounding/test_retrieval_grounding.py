@@ -95,6 +95,47 @@ def test_current_ratio_is_calculated_deterministically_with_refs(store: SQLiteFi
     assert set(calculated.input_fact_refs) == {fact.fact_id for fact in result.facts}
 
 
+def test_comparison_context_includes_prior_fact_provenance_without_extra_metrics(
+    store: SQLiteFinancialStore,
+) -> None:
+    for period, assets, receivables, revenue, net_income in (
+        ("FY2024", "80", "15", "100", "10"),
+        ("FY2025", "120", "20", "120", "20"),
+    ):
+        store.add_fact(
+            make_fact(
+                "abc", "total_assets", period, assets, statement="balance_sheet"
+            )
+        )
+        store.add_fact(
+            make_fact(
+                "abc",
+                "accounts_receivable",
+                period,
+                receivables,
+                statement="balance_sheet",
+            )
+        )
+        store.add_fact(make_fact("abc", "revenue", period, revenue))
+        store.add_fact(make_fact("abc", "net_income", period, net_income))
+
+    result = RetrievalGroundingAgent(store).retrieve_context(
+        "What are DSO and ROA in FY2025?",
+        "abc",
+        "FY2025",
+        include_all_financial_facts=True,
+    )
+
+    assert {fact.fiscal_year for fact in result.facts} == {"FY2024", "FY2025"}
+    assert {metric.period for metric in result.computed_metrics} == {"FY2025"}
+    fact_ids = {fact.fact_id for fact in result.facts}
+    assert all(
+        set(metric.input_fact_refs) <= fact_ids
+        for metric in result.computed_metrics
+    )
+    assert "FISCAL_YEAR_END_MISMATCH" not in result.warnings
+
+
 def test_currency_and_unit_mismatch_warn_and_prevent_calculation(store: SQLiteFinancialStore) -> None:
     store.add_fact(make_fact("abc", "current_assets", "FY2025", "150", currency="GBP", unit="thousands"))
     store.add_fact(make_fact("abc", "current_liabilities", "FY2025", "100", currency="USD", unit="millions"))

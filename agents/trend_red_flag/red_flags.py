@@ -261,7 +261,19 @@ def _one_fact(
         if fact.canonical_line_item == metric
         and (period is None or fact.fiscal_year == period)
     ]
-    return matches[0] if len(matches) == 1 else None
+    measurements = {
+        (
+            fact.value,
+            fact.currency,
+            fact.unit,
+            fact.period_start,
+            fact.period_end,
+            fact.fiscal_year_end,
+            fact.metric_definition,
+        ): fact
+        for fact in matches
+    }
+    return next(iter(measurements.values())) if len(measurements) == 1 else None
 
 
 def _fact_compatibility_warnings(

@@ -41,6 +41,24 @@ class PromptBuilder:
         )
         return SYSTEM_PROMPT, user_prompt
 
+    def build_summary(
+        self, evidence: AnswerEvidence, section: str
+    ) -> tuple[str, str]:
+        """Build a concise summary prompt from one verified evidence bundle."""
+        system_prompt, user_prompt = self.build(evidence)
+        system_prompt += (
+            "\nThis is a dashboard section summary. Write 2–4 concise sentences. "
+            f"Summarize only the {section} section represented in the evidence. "
+            "Describe metric availability, explicitly represented trend "
+            "directions, red-flag statuses, and relevant warnings only when "
+            "those are present in the evidence. Do not infer causes or label "
+            "performance as strong or weak. Do not repeat numeric values or "
+            "period years; they are already displayed with their citations in "
+            "the dashboard. Treat red flags as indicators for review, not "
+            "conclusions."
+        )
+        return system_prompt, user_prompt
+
     def build_comparison(
         self, result: ComparisonResult
     ) -> tuple[str, str]:
@@ -67,5 +85,28 @@ class PromptBuilder:
             f"{json.dumps(result.question, ensure_ascii=False)}\n\n"
             "Verified ComparisonResult:\n"
             f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
+        )
+        return system_prompt, user_prompt
+
+    def build_comparison_summary(
+        self, result: ComparisonResult
+    ) -> tuple[str, str]:
+        """Build a summary prompt that preserves comparison compatibility checks."""
+        summary_result = result.model_copy(
+            update={
+                "question": (
+                    "Provide a concise summary of the verified comparable "
+                    "metrics, incompatibilities, missing evidence, and warnings."
+                )
+            }
+        )
+        system_prompt, user_prompt = self.build_comparison(summary_result)
+        system_prompt += (
+            " Write 2–4 concise sentences. Compare only metrics marked "
+            "COMPARABLE; identify INCOMPARABLE or missing-evidence results and "
+            "surface relevant warning codes. Do not repeat numeric values or "
+            "period years; they are already displayed with their citations in "
+            "the comparison. Do not rank the companies overall, label a "
+            "company stronger or weaker, or infer causes."
         )
         return system_prompt, user_prompt

@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pytest
 
-from agents.narrative_qa.agent import NarrativeQAAgent
+from agents.narrative_qa.agent import NarrativeQAAgent, NarrativeSummaryError
 from agents.narrative_qa.citation_validator import CitationValidator
 from agents.narrative_qa.formatters import SafeFallbackFormatter
 from agents.narrative_qa.prompt_builder import PromptBuilder
@@ -307,6 +307,56 @@ def test_causal_claim_requires_retrieved_narrative_support() -> None:
     assert supported.valid
 
 
+def test_unsupported_association_is_rejected_and_fallback_quotes_narrative() -> None:
+    narrative = DocumentChunk(
+        chunk_id="cash-flow-commentary",
+        company_id="abc",
+        company_name="ABC",
+        document_type="annual_report",
+        section="Management Commentary",
+        period="FY2025",
+        source_id="source-note",
+        source_file="notes.pdf",
+        page=4,
+        text=(
+            "Receivables and inventory increased, while operating cash flow "
+            "declined."
+        ),
+    )
+    evidence = AnswerEvidence(
+        question="What factors does management mention for the cash flow decline?",
+        company_id="abc",
+        narrative_evidence=[narrative],
+    )
+    unsupported = CitationValidator().validate(
+        "Management says the cash flow decline is associated with higher "
+        "receivables and inventory "
+        f"{narrative.source_reference.citation}.",
+        evidence,
+    )
+    unsupported_attribution = CitationValidator().validate(
+        "Management says the cash flow decline is attributed to higher "
+        "receivables and inventory "
+        f"{narrative.source_reference.citation}.",
+        evidence,
+    )
+    answer = NarrativeQAAgent(
+        llm_client=StaticClient(
+            "Management says the cash flow decline is attributed to higher "
+            "receivables and inventory "
+            f"{narrative.source_reference.citation}."
+        )
+    ).answer(evidence)
+
+    assert not unsupported.valid
+    assert not unsupported_attribution.valid
+    assert any("not explicitly supported" in error for error in unsupported.errors)
+    assert "Receivables and inventory increased" in answer
+    assert narrative.source_reference.citation in answer
+    assert "associated with" not in answer
+    assert "attributed to" not in answer
+
+
 def test_causal_question_without_narrative_refuses_to_infer_a_cause() -> None:
     evidence = AnswerEvidence(
         question="Why did operating margin decline?",
@@ -409,6 +459,125 @@ def test_comparison_question_without_comparison_evidence_is_not_answered() -> No
 
     assert "does not include verified" in answer
     assert "£100" not in answer
+
+
+def test_summary_uses_configured_model_and_validates_numeric_claims() -> None:
+    assets = make_fact("current_assets", "150", page=2)
+    liabilities = make_fact("current_liabilities", "100", page=3)
+    metric = make_metric(
+        "current_ratio",
+        "FY2025",
+        "1.5000",
+        [assets.fact_id, liabilities.fact_id],
+    )
+    evidence = AnswerEvidence(
+        question="Summarize the Liquidity financial ratios section.",
+        company_id="abc",
+        periods=["FY2025"],
+        facts=[assets, liabilities],
+        computed_metrics=[metric],
+    )
+    client = StaticClient(
+        "The current ratio is calculated from current assets and current "
+        "liabilities."
+    )
+
+    summary = NarrativeQAAgent(llm_client=client).summarize(
+        evidence, section="Liquidity"
+    )
+
+    assert "current ratio" in summary.casefold()
+    assert client.prompts is not None
+    assert "dashboard section summary" in client.prompts[0]
+    assert "Do not repeat numeric values" in client.prompts[0]
+    assert "current_ratio_v1" in client.prompts[1]
+
+
+def test_summary_requires_provider_and_rejects_unsupported_figures() -> None:
+    evidence = AnswerEvidence(
+        question="Summarize Liquidity.",
+        company_id="abc",
+        facts=[make_fact("current_assets", "150")],
+    )
+
+    with pytest.raises(NarrativeSummaryError, match="no model provider") as missing:
+        NarrativeQAAgent().summarize(evidence, section="Liquidity")
+    assert missing.value.status_code == 503
+
+    agent = NarrativeQAAgent(
+        llm_client=StaticClient(
+            "Current assets are £999 [Balance Sheet | FY2025 | Current Assets | p.12]."
+        )
+    )
+    with pytest.raises(NarrativeSummaryError, match="evidence validation") as rejected:
+        agent.summarize(evidence, section="Liquidity")
+    assert rejected.value.status_code == 502
+
+
+def test_summary_validator_rejects_figures_unproven_trends_and_flags() -> None:
+    evidence = AnswerEvidence(
+        question="Summarize Liquidity.",
+        company_id="abc",
+        facts=[make_fact("current_assets", "150")],
+    )
+    validator = CitationValidator()
+
+    numeric = validator.validate_summary(
+        "Current assets are 150.", evidence
+    )
+    trend = validator.validate_summary(
+        "Liquidity improved during the period.", evidence
+    )
+    flags = validator.validate_summary(
+        "There are no red flags.", evidence
+    )
+
+    assert not numeric.valid
+    assert any("must not repeat numeric values" in error for error in numeric.errors)
+    assert not trend.valid
+    assert any("Trend claims" in error for error in trend.errors)
+    assert not flags.valid
+    assert any("Red-flag claims" in error for error in flags.errors)
+
+
+def test_summary_retries_once_when_first_draft_fails_validation() -> None:
+    assets = make_fact("current_assets", "150", page=2)
+    liabilities = make_fact("current_liabilities", "100", page=3)
+    evidence = AnswerEvidence(
+        question="Summarize Liquidity.",
+        company_id="abc",
+        facts=[assets, liabilities],
+        computed_metrics=[
+            make_metric(
+                "current_ratio",
+                "FY2025",
+                "1.5000",
+                [assets.fact_id, liabilities.fact_id],
+            )
+        ],
+    )
+
+    class SequenceClient:
+        def __init__(self) -> None:
+            self.completions = [
+                "Current ratio was 9.0 [Balance Sheet | FY2025 | Current Assets | p.2].",
+                "Current ratio is calculated from current assets and liabilities.",
+            ]
+            self.calls = 0
+
+        def generate(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls += 1
+            if self.calls == 2:
+                assert "previous draft failed evidence validation" in system_prompt
+            return self.completions.pop(0)
+
+    client = SequenceClient()
+    summary = NarrativeQAAgent(llm_client=client).summarize(
+        evidence, section="Liquidity"
+    )
+
+    assert "current ratio" in summary.casefold()
+    assert client.calls == 2
 
 
 class StaticClient:

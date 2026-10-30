@@ -1,22 +1,24 @@
 """MVP aliases and formula input mappings; safe to extend without agent changes."""
 
 METRIC_ALIASES: dict[str, tuple[str, ...]] = {
-    "revenue": ("revenue", "total revenue", "revenue from operations", "sales", "turnover"),
+    "revenue": ("revenue", "total revenue", "revenue from operations", "sales", "turnover", "total income"),
     "gross_profit": ("gross profit", "gross profit for the year"),
     "operating_profit": ("operating profit", "profit from operations", "operating income", "ebit"),
-    "net_income": ("net income", "profit after tax", "net profit", "profit for the year", "profit for the period"),
+    "net_income": ("net income", "profit after tax", "net profit", "profit for the year", "profit for the period", "profit loss for the year"),
     "ebitda": ("ebitda",),
     "current_assets": ("current assets", "total current assets"),
     "current_liabilities": ("current liabilities", "total current liabilities"),
     "inventory": ("inventory", "inventories", "stock"),
-    "accounts_receivable": ("accounts receivable", "receivables", "debtors", "trade receivables", "trade and other receivables"),
-    "total_debt": ("total debt", "debt", "borrowings", "loans and borrowings", "total borrowings"),
+    "accounts_receivable": ("accounts receivable", "debtors", "trade receivables"),
+    "total_debt": ("total debt", "total borrowings", "loans and borrowings"),
+    "debt_component": ("borrowings", "borrowings other than debt securities", "debt securities"),
     "equity": ("equity", "total equity", "shareholders' equity", "shareholders equity", "total shareholders' equity"),
     "total_assets": ("total assets", "assets"),
-    "operating_cash_flow": ("operating cash flow", "cash flow from operations", "net cash from operating activities", "net cash generated from operating activities"),
+    "operating_cash_flow": ("operating cash flow", "cash flow from operations", "net cash from operating activities", "net cash flow from operating activities", "net cash generated from operating activities", "net cash used in generated from operating activities"),
     "interest_expense": ("interest expense", "finance costs", "finance expenses"),
     "cost_of_goods_sold": ("cost of goods sold", "cost of sales", "cost of revenue"),
     "ebit": ("ebit", "earnings before interest and tax"),
+    "profit_before_tax": ("profit before tax", "profit before tax before exceptional items"),
 }
 
 COMPUTED_METRIC_ALIASES: dict[str, tuple[str, ...]] = {

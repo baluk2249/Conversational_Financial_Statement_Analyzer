@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from decimal import Decimal, DivisionByZero, InvalidOperation
+import re
 from uuid import uuid4
 
 from agents.retrieval_grounding.config import COMPUTED_METRIC_INPUTS
@@ -39,16 +40,73 @@ def calculate_ratio(
         grouped[fact.fiscal_year][fact.canonical_line_item].append(fact)
 
     current: dict[str, FinancialFact] = {}
+    selected: list[FinancialFact] = []
     warnings: list[str] = []
+    derived_formulas: list[str] = []
     for name in required:
         matches = grouped.get(period, {}).get(name, [])
-        if len(matches) > 1:
+        if not matches and name == "total_debt":
+            components = _distinct_component_facts(
+                grouped.get(period, {}).get("debt_component", [])
+            )
+            if len(components) >= 2:
+                total = sum((fact.value for fact in components), ZERO)
+                current[name] = components[0].model_copy(
+                    update={
+                        "canonical_line_item": "total_debt",
+                        "metric_definition": "total_debt_components_v1",
+                        "value": total,
+                    }
+                )
+                selected.extend(components)
+                derived_formulas.append("total_debt_components_v1")
+                continue
+        if not matches and name == "ebit":
+            profit_before_tax = _distinct_measurements(
+                grouped.get(period, {}).get("profit_before_tax", [])
+            )
+            finance_costs = _distinct_measurements(
+                grouped.get(period, {}).get("interest_expense", [])
+            )
+            operating_profit = _distinct_measurements(
+                grouped.get(period, {}).get("operating_profit", [])
+            )
+            if len(profit_before_tax) == 1 and len(finance_costs) == 1:
+                before_tax = profit_before_tax[0]
+                interest = finance_costs[0]
+                current[name] = before_tax.model_copy(
+                    update={
+                        "canonical_line_item": "ebit",
+                        "metric_definition": "profit_before_tax_plus_finance_costs_v2",
+                        "value": before_tax.value + abs(interest.value),
+                    }
+                )
+                selected.append(before_tax)
+                derived_formulas.append("ebit_from_profit_before_tax_v2")
+                continue
+            if len(operating_profit) == 1:
+                current[name] = operating_profit[0].model_copy(
+                    update={
+                        "canonical_line_item": "ebit",
+                        "metric_definition": "operating_profit_as_ebit_v1",
+                    }
+                )
+                selected.extend(operating_profit)
+                derived_formulas.append("operating_profit_as_ebit_v1")
+                continue
+        distinct_matches = _distinct_measurements(matches)
+        if len(distinct_matches) > 1:
             warnings.append(f"AMBIGUOUS_INPUT:{name}")
-        elif matches:
-            current[name] = matches[0]
+            selected.extend(matches)
+        elif distinct_matches:
+            current[name] = distinct_matches[0]
+            selected.extend(matches)
 
-    missing = [name for name in required if name not in current]
-    selected = list(current.values())
+    missing = [
+        name for name in required
+        if name not in current
+        and f"AMBIGUOUS_INPUT:{name}" not in warnings
+    ]
     prior_period: str | None = None
     average_metric = AVERAGE_BALANCE_METRICS.get(metric)
     if average_metric and average_metric in current:
@@ -57,11 +115,12 @@ def calculate_ratio(
             missing.append(f"prior_period:{average_metric}")
         else:
             prior_matches = grouped[prior_period][average_metric]
-            if len(prior_matches) != 1:
+            distinct_prior_matches = _distinct_measurements(prior_matches)
+            if len(distinct_prior_matches) != 1:
                 warnings.append(f"AMBIGUOUS_INPUT:{average_metric}:{prior_period}")
-                missing.append(f"prior_period:{average_metric}")
+                selected.extend(prior_matches)
             else:
-                selected.append(prior_matches[0])
+                selected.extend(prior_matches)
 
     selected = _unique_facts(selected)
     warnings.extend(_compatibility_warnings(selected, period))
@@ -92,7 +151,14 @@ def calculate_ratio(
             else "percent" if metric in {"gross_margin", "operating_margin", "net_margin", "roa", "roe"}
             else "ratio"
         ),
-        formula_version=f"{metric}_v1",
+        formula_version="+".join(
+            [
+                f"{metric}_v2"
+                if metric in {"interest_coverage", "inventory_days"}
+                else f"{metric}_v1",
+                *derived_formulas,
+            ]
+        ),
         input_fact_refs=[fact.fact_id for fact in selected],
         quality_status="VALID",
         currency=selected[0].currency if selected else None,
@@ -112,7 +178,13 @@ class RatioCalculator:
     def calculate(self, company_id: str, metric: str, period: str) -> ComputedMetric:
         if metric not in COMPUTED_METRIC_INPUTS:
             raise ValueError(f"Unsupported computed metric: {metric}")
-        facts = self.store.get_facts(company_id, COMPUTED_METRIC_INPUTS[metric])
+        required = list(COMPUTED_METRIC_INPUTS[metric])
+        if "total_debt" in required:
+            required.append("debt_component")
+        if "ebit" in required:
+            required.append("profit_before_tax")
+            required.append("operating_profit")
+        facts = self.store.get_facts(company_id, required)
         return calculate_ratio(facts, company_id, metric, period)
 
 
@@ -126,25 +198,74 @@ def _unique_facts(facts: Sequence[FinancialFact]) -> list[FinancialFact]:
     return result
 
 
+def _distinct_measurements(
+    facts: Sequence[FinancialFact],
+) -> list[FinancialFact]:
+    """Collapse corroborating copies while retaining each source reference."""
+    measurements: dict[tuple[object, ...], FinancialFact] = {}
+    for fact in facts:
+        key = (
+            fact.value,
+            fact.currency,
+            fact.unit,
+            fact.period_start,
+            fact.period_end,
+            fact.fiscal_year_end,
+            fact.metric_definition,
+        )
+        measurements.setdefault(key, fact)
+    return list(measurements.values())
+
+
+def _distinct_component_facts(
+    facts: Sequence[FinancialFact],
+) -> list[FinancialFact]:
+    result: list[FinancialFact] = []
+    seen: set[tuple[object, ...]] = set()
+    for fact in facts:
+        key = (
+            fact.source_file,
+            fact.statement_type,
+            fact.fiscal_year,
+            fact.locator.page,
+            fact.locator.details.get("table_index"),
+            fact.locator.details.get("table_row"),
+            fact.value,
+            fact.currency,
+            fact.unit,
+        )
+        if key not in seen:
+            seen.add(key)
+            result.append(fact)
+    return result
+
+
 def _find_prior_period(
     period: str,
     current_fact: FinancialFact,
     grouped: dict[str, dict[str, list[FinancialFact]]],
     metric: str,
 ) -> str | None:
-    if current_fact.period_start is None:
+    reference_date = current_fact.period_start or current_fact.period_end
+    if reference_date is not None:
+        candidates = [
+            (candidate, fact)
+            for candidate, line_items in grouped.items()
+            if candidate != period
+            for fact in line_items.get(metric, [])
+            if fact.period_end is not None
+            and fact.period_end < reference_date
+        ]
+        if candidates:
+            return max(candidates, key=lambda item: item[1].period_end)[0]
+
+    fiscal_year = re.fullmatch(r"FY(20\d{2})", period, re.IGNORECASE)
+    if fiscal_year is None:
         return None
-    candidates = [
-        (candidate, matches[0])
-        for candidate, line_items in grouped.items()
-        if candidate != period
-        and len(matches := line_items.get(metric, [])) == 1
-        and matches[0].period_end is not None
-        and matches[0].period_end < current_fact.period_start
-    ]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda item: item[1].period_end)[0]
+    prior_period = f"FY{int(fiscal_year.group(1)) - 1}"
+    if grouped.get(prior_period, {}).get(metric):
+        return prior_period
+    return None
 
 
 def _formula(
@@ -160,7 +281,7 @@ def _formula(
         "operating_cash_flow_ratio": lambda: values["operating_cash_flow"] / values["current_liabilities"],
         "debt_to_equity": lambda: values["total_debt"] / values["equity"],
         "debt_to_assets": lambda: values["total_debt"] / values["total_assets"],
-        "interest_coverage": lambda: values["ebit"] / values["interest_expense"],
+        "interest_coverage": lambda: values["ebit"] / abs(values["interest_expense"]),
         "gross_margin": lambda: values["gross_profit"] / values["revenue"],
         "operating_margin": lambda: values["operating_profit"] / values["revenue"],
         "net_margin": lambda: values["net_income"] / values["revenue"],
@@ -169,7 +290,7 @@ def _formula(
         "dso": lambda: _average("accounts_receivable", current, grouped, prior_period)
         / values["revenue"] * _days(current["revenue"]),
         "inventory_days": lambda: _average("inventory", current, grouped, prior_period)
-        / values["cost_of_goods_sold"] * _days(current["cost_of_goods_sold"]),
+        / abs(values["cost_of_goods_sold"]) * _days(current["cost_of_goods_sold"]),
         "asset_turnover": lambda: values["revenue"] / _average("total_assets", current, grouped, prior_period),
     }
     return formulas[metric]()

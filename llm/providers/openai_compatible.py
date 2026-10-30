@@ -56,7 +56,6 @@ class OpenAICompatibleClient:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},
                     ],
-                    "temperature": 0,
                 }
             ).encode("utf-8"),
             headers={
@@ -74,7 +73,40 @@ class OpenAICompatibleClient:
             return content.strip()
         except LLMProviderError:
             raise
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError, KeyError, IndexError, TypeError) as error:
+        except HTTPError as error:
+            detail = _http_error_detail(error)
+            raise LLMProviderError(
+                f"The language-model provider request failed "
+                f"(HTTP {error.code}): {detail}"
+            ) from error
+        except (
+            URLError,
+            TimeoutError,
+            OSError,
+            ValueError,
+            KeyError,
+            IndexError,
+            TypeError,
+        ) as error:
             raise LLMProviderError(
                 f"The language-model provider request failed: {error}"
             ) from error
+
+
+def _http_error_detail(error: HTTPError) -> str:
+    try:
+        body = json.loads(error.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return error.reason
+
+    if not isinstance(body, dict):
+        return error.reason
+    provider_error = body.get("error")
+    if isinstance(provider_error, dict):
+        message = provider_error.get("message")
+        code = provider_error.get("code")
+        param = provider_error.get("param")
+        details = [str(value) for value in (message, code, param) if value]
+        if details:
+            return "; ".join(details)[:500]
+    return error.reason

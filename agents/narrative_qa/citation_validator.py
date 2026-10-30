@@ -19,13 +19,32 @@ NUMBER_PATTERN = re.compile(
 )
 CAUSAL_PATTERN = re.compile(
     r"\b(?:because|caused by|due to|driven by|resulted from|"
-    r"as a result of|attributable to|led to|contributed to|owing to)\b",
+    r"as a result of|attribut(?:ed|able) to|led to|contributed to|owing to|"
+    r"associated with|linked to|correlated with)\b",
+    re.IGNORECASE,
+)
+EXPLICIT_RELATION_PATTERN = re.compile(
+    r"\b(?:associated with|linked to|correlated with|"
+    r"attribut(?:ed|able) to)\b",
     re.IGNORECASE,
 )
 CAUSAL_RELATION_PATTERN = re.compile(
     r"\b(?:because|cause[sd]?|due to|drive[sn]?|result(?:ed|ing)?|"
     r"reduc(?:e|ed|ing)|increas(?:e|ed|ing)|contribut(?:e|ed|ing)|"
-    r"affect(?:ed|s|ing)?|impact(?:ed|s|ing)?|lead|led)\b",
+    r"affect(?:ed|s|ing)?|impact(?:ed|s|ing)?|lead|led|"
+    r"attribut(?:e|ed|able|ing)|associated with|linked to|"
+    r"correlated with)\b",
+    re.IGNORECASE,
+)
+TREND_LANGUAGE_PATTERN = re.compile(
+    r"\b(?:increas(?:e|ed|ing)|rose|risen|declin(?:e|ed|ing)|fell|falling|"
+    r"improv(?:e|ed|ing)|worsen(?:ed|ing)?|deteriorat(?:e|ed|ing)|"
+    r"compress(?:ed|ion)|climb(?:ed|ing)|build[- ]up)\b",
+    re.IGNORECASE,
+)
+UNSUPPORTED_FLAG_PATTERN = re.compile(r"\bred flags?\b", re.IGNORECASE)
+OVERALL_RANKING_PATTERN = re.compile(
+    r"\b(?:stronger|weaker|best|better|worse)\s+(?:company|overall|performance)\b",
     re.IGNORECASE,
 )
 STOP_WORDS = {
@@ -153,6 +172,43 @@ class CitationValidator:
             )
         return ValidationResult(not errors, errors)
 
+    def validate_summary(
+        self, answer: str, evidence: AnswerEvidence
+    ) -> ValidationResult:
+        """Validate a dashboard summary without repeating display values."""
+        base_result = self.validate(answer, evidence)
+        errors = [*base_result.errors, *self._summary_errors(answer)]
+        if not evidence.red_flags and UNSUPPORTED_FLAG_PATTERN.search(answer):
+            errors.append(
+                "Red-flag claims are unsupported by this summary evidence"
+            )
+        if not evidence.trends and TREND_LANGUAGE_PATTERN.search(answer):
+            errors.append(
+                "Trend claims are unsupported by this summary evidence"
+            )
+        return ValidationResult(not errors, errors)
+
+    def validate_comparison_summary(
+        self, answer: str, result: ComparisonResult
+    ) -> ValidationResult:
+        """Validate a comparison summary without repeating displayed values."""
+        base_result = self.validate_comparison(answer, result)
+        errors = [*base_result.errors, *self._summary_errors(answer)]
+        if OVERALL_RANKING_PATTERN.search(answer):
+            errors.append(
+                "Overall company rankings are not supported by comparison evidence"
+            )
+        return ValidationResult(not errors, errors)
+
+    @staticmethod
+    def _summary_errors(answer: str) -> list[str]:
+        scrubbed = CITATION_PATTERN.sub("", answer)
+        if NUMBER_PATTERN.search(scrubbed) or re.search(
+            r"\bFY\d{4}\b", scrubbed, re.IGNORECASE
+        ):
+            return ["Dashboard summaries must not repeat numeric values or years"]
+        return []
+
     def _citation_values(
         self, evidence: AnswerEvidence
     ) -> dict[str, set[Decimal]]:
@@ -225,6 +281,14 @@ class CitationValidator:
         for match in CAUSAL_PATTERN.finditer(answer):
             clause_end = re.search(r"[.!?]", answer[match.end():])
             end = match.end() + clause_end.start() if clause_end else len(answer)
+            if EXPLICIT_RELATION_PATTERN.fullmatch(match.group(0)):
+                relation = match.group(0).casefold()
+                if not any(relation in text for text in narrative):
+                    errors.append(
+                        "Association or attribution is not explicitly supported "
+                        "by retrieved narrative evidence"
+                    )
+                    continue
             prefix_start = max(0, match.start() - 180)
             prefix = answer[prefix_start:match.start()]
             if not re.search(
@@ -332,7 +396,8 @@ def _causal_clause_supported(clause: str, narrative: str) -> bool:
         return False
     cause = re.split(
         r"\b(?:because|caused by|due to|driven by|resulted from|"
-        r"as a result of|attributable to|led to|contributed to|owing to)\b",
+        r"as a result of|attribut(?:ed|able) to|led to|contributed to|owing to|"
+        r"associated with|linked to|correlated with)\b",
         clause,
         maxsplit=1,
     )[-1]

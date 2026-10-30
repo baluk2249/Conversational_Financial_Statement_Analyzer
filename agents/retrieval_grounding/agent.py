@@ -53,6 +53,11 @@ class RetrievalGroundingAgent:
         intent = self.query_parser.parse(question, period)
         requested_periods = list(intent.periods) or None
         query_periods = self._include_prior_period(requested_periods) if intent.wants_trends else requested_periods
+        fact_periods = (
+            self._include_prior_period(requested_periods)
+            if intent.wants_trends or include_all_financial_facts
+            else requested_periods
+        )
         fact_metrics = list(intent.fact_metrics)
         if include_all_financial_facts:
             fact_metrics = list(dict.fromkeys([*fact_metrics, *METRIC_ALIASES]))
@@ -60,13 +65,13 @@ class RetrievalGroundingAgent:
             None if include_all_financial_facts else intent.statement_type
         )
         facts = self.structured_store.get_facts(
-            company_id, fact_metrics, query_periods, statement_filter,
+            company_id, fact_metrics, fact_periods, statement_filter,
         )
         facts = [
             fact for fact in facts
             if fact.company_id == company_id
             and fact.canonical_line_item in fact_metrics
-            and (query_periods is None or fact.fiscal_year in query_periods)
+            and (fact_periods is None or fact.fiscal_year in fact_periods)
             and (statement_filter is None or fact.statement_type == statement_filter)
         ]
         available_periods = sorted({fact.fiscal_year for fact in facts})
@@ -204,7 +209,14 @@ class RetrievalGroundingAgent:
     def _compatibility_warnings(facts: Sequence[object]) -> list[str]:
         currencies = {getattr(fact, "currency") for fact in facts if getattr(fact, "currency", None)}
         units = {getattr(fact, "unit") for fact in facts if getattr(fact, "unit", None)}
-        fiscal_year_ends = {getattr(fact, "fiscal_year_end") for fact in facts if getattr(fact, "fiscal_year_end", None)}
+        fiscal_year_ends = {
+            (
+                getattr(fact, "fiscal_year_end").month,
+                getattr(fact, "fiscal_year_end").day,
+            )
+            for fact in facts
+            if getattr(fact, "fiscal_year_end", None)
+        }
         period_lengths = {
             (fact.period_end - fact.period_start).days + 1
             for fact in facts if getattr(fact, "period_start", None) and getattr(fact, "period_end", None)

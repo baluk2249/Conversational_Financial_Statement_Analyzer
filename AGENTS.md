@@ -28,6 +28,25 @@ The application should:
 - refuse or return insufficient evidence when requested figures are unavailable;
 - optionally compare two companies while surfacing period, currency, unit, fiscal-year-end, or definition mismatches.
 
+### Technology Stack
+
+The target application stack is:
+
+- **Frontend:** Streamlit
+- **Backend API:** FastAPI
+- **Agent workflow:** LangGraph
+- **RAG utilities:** LangChain where useful
+- **Vector database:** FAISS
+- **Structured database:** SQLite initially
+- **Models and schemas:** Pydantic
+- **Calculations:** Python `Decimal` and pandas
+- **Testing:** pytest
+- **LLM:** OpenAI
+
+This is the target stack, not a claim that every component is already implemented.
+Agents must preserve the data contracts and responsibility boundaries below as
+the application evolves toward it.
+
 ---
 
 ## 2. Agent Roster

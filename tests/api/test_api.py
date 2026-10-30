@@ -23,15 +23,19 @@ zenith,Zenith Ltd,FY2025,balance_sheet,current_liabilities,100,GBP,absolute,2025
 """
 
 
-def _client(tmp_path: Path) -> TestClient:
-    return TestClient(create_app(_service(tmp_path)))
+def _client(
+    tmp_path: Path, narrative_agent: NarrativeQAAgent | None = None
+) -> TestClient:
+    return TestClient(create_app(_service(tmp_path, narrative_agent)))
 
 
-def _service(tmp_path: Path) -> AnalyzerService:
+def _service(
+    tmp_path: Path, narrative_agent: NarrativeQAAgent | None = None
+) -> AnalyzerService:
     return AnalyzerService(
         SQLiteFinancialStore(":memory:"),
         LazyFaissNarrativeStore(tmp_path / "faiss"),
-        narrative_agent=NarrativeQAAgent(),
+        narrative_agent=narrative_agent or NarrativeQAAgent(),
     )
 
 
@@ -206,6 +210,89 @@ def test_question_ratio_red_flag_and_comparison_endpoints(tmp_path) -> None:
     assert comparison.json()["metrics"][0]["comparison_status"] == "COMPARABLE"
     assert comparison.json()["metrics"][0]["company_a"]["citations"]
     assert comparison.json()["metrics"][0]["company_b"]["citations"]
+
+    unavailable_summary = client.post(
+        "/analysis/acme/summaries/ratios",
+        json={"section": "Liquidity", "period": "FY2025"},
+    )
+    assert unavailable_summary.status_code == 503
+    assert "no model provider is configured" in unavailable_summary.json()["detail"]
+
+
+def test_summary_endpoints_use_configured_llm(tmp_path) -> None:
+    class StaticClient:
+        def generate(self, system_prompt: str, user_prompt: str) -> str:
+            assert "Evidence" in user_prompt or "ComparisonResult" in user_prompt
+            return (
+                "The section summarizes the available verified evidence and "
+                "identifies limitations."
+            )
+
+    client = _client(
+        tmp_path,
+        NarrativeQAAgent(llm_client=StaticClient()),
+    )
+    _upload(client)
+
+    ratio_summary = client.post(
+        "/analysis/acme/summaries/ratios",
+        json={"section": "Liquidity", "period": "FY2025"},
+    )
+    assert ratio_summary.status_code == 200
+    assert ratio_summary.json()["section"] == "Liquidity"
+    assert "verified evidence" in ratio_summary.json()["summary"]
+
+    flag_summary = client.post(
+        "/analysis/acme/summaries/red-flags",
+        json={"period": "FY2025"},
+    )
+    assert flag_summary.status_code == 200
+    assert flag_summary.json()["summary"]
+
+    comparison_summary = client.post(
+        "/comparison/summary",
+        json={
+            "company_a": "acme",
+            "company_b": "zenith",
+            "metrics": ["current_ratio"],
+            "period_a": "FY2025",
+            "period_b": "FY2025",
+        },
+    )
+    assert comparison_summary.status_code == 200
+    assert comparison_summary.json()["status"] == "OK"
+    assert comparison_summary.json()["summary"]
+
+
+def test_ratio_summary_includes_prior_period_inputs(tmp_path) -> None:
+    class CapturingClient:
+        user_prompt = ""
+
+        def generate(self, system_prompt: str, user_prompt: str) -> str:
+            self.user_prompt = user_prompt
+            return "Asset turnover is calculated from available statement evidence."
+
+    llm_client = CapturingClient()
+    service = _service(tmp_path, NarrativeQAAgent(llm_client=llm_client))
+    csv = (
+        "company_id,company_name,fiscal_year,statement_type,line_item,value,currency,"
+        "unit,period_start,period_end,fiscal_year_end\n"
+        "acme,Acme Ltd,FY2024,balance_sheet,total_assets,1000,GBP,absolute,"
+        "2024-01-01,2024-12-31,2024-12-31\n"
+        "acme,Acme Ltd,FY2025,balance_sheet,total_assets,2000,GBP,absolute,"
+        "2025-01-01,2025-12-31,2025-12-31\n"
+        "acme,Acme Ltd,FY2025,income_statement,revenue,1000,GBP,absolute,"
+        "2025-01-01,2025-12-31,2025-12-31\n"
+    )
+    service.ingest_document("periods.csv", csv.encode("utf-8"))
+
+    summary = service.summarize_ratio_section(
+        "acme", "Efficiency", "FY2025"
+    )
+
+    assert summary["summary"]
+    assert "FY2024 | total_assets" in llm_client.user_prompt
+    assert "Sheet: CSV" in llm_client.user_prompt
 
 
 def test_insufficient_evidence_and_unknown_scope_are_explicit(tmp_path) -> None:

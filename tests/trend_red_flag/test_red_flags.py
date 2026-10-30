@@ -105,6 +105,32 @@ def test_accrual_quality_gap_requires_both_evidence_facts(fact_factory):
     assert missing["accrual_quality_gap"].status == "INSUFFICIENT_EVIDENCE"
 
 
+def test_accrual_gap_collapses_identical_net_income_from_two_statements(fact_factory):
+    income_net_income = fact_factory("net_income", "FY2025", "10")
+    cash_flow_net_income = income_net_income.model_copy(
+        update={
+            "fact_id": "cash-flow-net-income",
+            "statement_type": "cash_flow_statement",
+            "source_file": "cash-flow.pdf",
+        }
+    )
+    operating_cash_flow = fact_factory(
+        "operating_cash_flow", "FY2025", "4", statement="cash_flow_statement"
+    )
+
+    flags = {
+        flag.flag_type: flag
+        for flag in _flags(
+            "abc",
+            ["FY2025"],
+            [income_net_income, cash_flow_net_income, operating_cash_flow],
+            [],
+        )
+    }
+
+    assert flags["accrual_quality_gap"].status == "TRIGGERED"
+
+
 def test_threshold_missing_and_single_period_are_explicit(metric_factory):
     config = load_rules().definitions.copy()
     del config["margin_compression"]

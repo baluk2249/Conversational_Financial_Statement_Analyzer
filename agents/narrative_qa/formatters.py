@@ -40,6 +40,16 @@ class SafeFallbackFormatter:
                 "The available statements do not provide evidence explaining the "
                 "cause; I will not infer one."
             )
+        elif is_causal_question(evidence.question):
+            narrative = [
+                chunk for chunk in evidence.narrative_evidence
+                if chunk.company_id == evidence.company_id
+            ]
+            answer = " ".join(
+                f'The retrieved narrative states: "{chunk.text}" '
+                f"{self.citations.narrative_citation(chunk)}"
+                for chunk in narrative
+            )
         elif _is_comparison_question(evidence.question):
             answer = (
                 "A comparison cannot be established because this evidence bundle "
@@ -308,7 +318,8 @@ def requires_deterministic_refusal(evidence: AnswerEvidence) -> bool:
 def is_causal_question(question: str) -> bool:
     return bool(
         re.search(
-            r"\b(?:why|cause\w*|reason\w*|what led to|what drove)\b",
+            r"\b(?:why|cause\w*|reason\w*|what led to|what drove|"
+            r"what factors?|what explains?)\b",
             question,
             re.IGNORECASE,
         )

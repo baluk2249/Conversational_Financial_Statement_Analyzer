@@ -7,7 +7,7 @@ import io
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -355,6 +355,13 @@ def _parse_pdf(
     except Exception as exc:
         raise DocumentProcessingError("The PDF file could not be read.") from exc
 
+    consolidated_pages = {
+        page_number
+        for page_number, text in page_text
+        if _is_consolidated_statement_page(text)
+    }
+    use_consolidated_scope = bool(consolidated_pages)
+
     try:
         extracted_tables = PDFTableExtractor().extract_tables(
             io.BytesIO(content), source_file=filename
@@ -403,16 +410,23 @@ def _parse_pdf(
     facts: list[FinancialFact] = []
     warnings: list[str] = []
     recognized_tables = 0
+    pdf_adapter = PDFFinancialFactAdapter()
     for table in extracted_tables:
         page_source_text = str(
             table.extraction_metadata.get("page_text", "")
         )
+        if (
+            use_consolidated_scope
+            and table.page_number not in consolidated_pages
+            and not _is_consolidated_statement_page(page_source_text)
+        ):
+            continue
         statement_type = detect_statement_type(
             f"{page_source_text}\n{table.raw_text}"
         )
         if statement_type == "other":
             continue
-        table_facts = _normalize_pdf_table(
+        table_facts = pdf_adapter.adapt_table(
             table,
             statement_type=statement_type,
             company_name=scoped_company_name,
@@ -433,6 +447,20 @@ def _parse_pdf(
     return chunks, facts, warnings
 
 
+def _is_consolidated_statement_page(text: str) -> bool:
+    statement_headings = re.compile(
+        r"\bconsolidated\b.*\b(?:income\s+statement|balance\s+sheet|"
+        r"statement\s+of\s+(?:profit\s+and\s+loss|income|operations|"
+        r"cash\s+flows?)|"
+        r"cash\s+fl(?:o\s*)?w\s+statement)\b",
+        re.IGNORECASE,
+    )
+    return any(
+        statement_headings.search(re.sub(r"\s+", " ", line))
+        for line in text.splitlines()
+    )
+
+
 def _normalize_pdf_table(
     table: ExtractedTable,
     *,
@@ -443,106 +471,231 @@ def _normalize_pdf_table(
     default_period: str | None,
     page_text: str,
 ) -> list[FinancialFact]:
-    supported_rows = {
-        _canonical_metric(row[0])
-        for row in table.rows
-        if row and row[0] and _canonical_metric(row[0]) is not None
-    }
-    if len(supported_rows) < 2:
-        return []
-
-    period_columns = _period_columns(
-        table, page_text=page_text, default_period=default_period
-    )
-    if not period_columns:
-        return []
-
-    context = "\n".join(
-        [table.raw_text, page_text, *table.headers]
-    )
-    currency = _currency_code(context)
-    unit = _financial_unit(context)
-    table_rows: list[tuple[int, dict[str, Any]]] = []
-    for row_number, raw_cells in enumerate(table.rows, start=2):
-        if not raw_cells:
-            continue
-        label = raw_cells[0]
-        if not label or _canonical_metric(label) is None:
-            continue
-        for column, fiscal_year in period_columns.items():
-            if column >= len(raw_cells):
-                continue
-            value = _pdf_amount(raw_cells[column])
-            if value is None:
-                continue
-            table_rows.append(
-                (
-                    row_number,
-                    {
-                        "company_id": company_id,
-                        "company_name": company_name,
-                        "fiscal_year": fiscal_year,
-                        "statement_type": statement_type,
-                        "line_item": label,
-                        "value": str(value),
-                        "currency": currency,
-                        "unit": unit,
-                    },
-                )
-            )
-    if not table_rows:
-        return []
-
-    return _normalize_rows(
-        table_rows,
-        sheet_name="",
-        filename=table.source_file,
-        source_id=source_id,
+    return PDFFinancialFactAdapter().adapt_table(
+        table,
+        statement_type=statement_type,
         company_name=company_name,
         company_id=company_id,
+        source_id=source_id,
         default_period=default_period,
-        statement_type_override=statement_type,
-        page_number=table.page_number,
-        table_index=table.table_index,
+        page_text=page_text,
     )
 
 
-def _period_columns(
+class PDFFinancialFactAdapter:
+    """Map extracted PDF tables into provenance-bearing canonical facts."""
+
+    def adapt_table(
+        self,
+        table: ExtractedTable,
+        *,
+        statement_type: str,
+        company_name: str,
+        company_id: str,
+        source_id: str,
+        default_period: str | None,
+        page_text: str,
+    ) -> list[FinancialFact]:
+        supported_rows = {
+            _canonical_metric(row[0])
+            for row in table.rows
+            if row and row[0] and _canonical_metric(row[0]) is not None
+        }
+        if not supported_rows:
+            return []
+
+        periods = _table_periods(
+            table, page_text=page_text, default_period=default_period
+        )
+        if not periods:
+            return []
+
+        context = "\n".join([table.raw_text, page_text, *table.headers])
+        currency = _currency_code(context)
+        unit = _financial_unit(context)
+        period_start_by_year = _period_starts(periods, page_text, statement_type)
+        has_note_headers = any(
+            cell and re.search(r"\bnotes?\b", cell, re.IGNORECASE)
+            for row in [table.headers, *table.rows[:5]]
+            for cell in row
+        )
+        has_reported_revenue = any(
+            row
+            and row[0]
+            and _canonical_metric(row[0]) == "revenue"
+            and _normalized_label(row[0]) != "total income"
+            for row in table.rows
+        )
+
+        table_rows: list[tuple[int, dict[str, Any]]] = []
+        for row_number, raw_cells in enumerate(table.rows, start=2):
+            if not raw_cells:
+                continue
+            label = raw_cells[0]
+            if not label or _canonical_metric(label) is None:
+                continue
+            canonical = _canonical_metric(label)
+            if (
+                statement_type == "cash_flow_statement"
+                and canonical in {"accounts_receivable", "inventory"}
+            ):
+                continue
+            normalized_label = _normalized_label(label)
+            if normalized_label == "total income" and has_reported_revenue:
+                continue
+
+            period_values = [
+                _pdf_amount(cell) for cell in raw_cells[1:]
+            ]
+            numeric_count = sum(value is not None for value in period_values)
+            if (
+                has_note_headers
+                and len(period_values) > len(periods)
+                and period_values
+                and (
+                    period_values[0] is None
+                    or (
+                        numeric_count > len(periods)
+                        and period_values[0] is not None
+                        and _is_note_number(period_values[0])
+                    )
+                )
+            ):
+                period_values = period_values[1:]
+            if len(period_values) < len(periods):
+                continue
+
+            for fiscal_year, value in zip(
+                periods, period_values[:len(periods)], strict=True
+            ):
+                if value is None:
+                    continue
+                raw_row: dict[str, Any] = {
+                    "company_id": company_id,
+                    "company_name": company_name,
+                    "fiscal_year": fiscal_year,
+                    "statement_type": statement_type,
+                    "line_item": label,
+                    "value": str(value),
+                    "currency": currency,
+                    "unit": unit,
+                }
+                period_dates = period_start_by_year.get(fiscal_year)
+                if period_dates:
+                    raw_row["period_start"], raw_row["period_end"] = period_dates
+                    raw_row["fiscal_year_end"] = period_dates[1]
+                table_rows.append((row_number, raw_row))
+
+        if not table_rows:
+            return []
+
+        return _normalize_rows(
+            table_rows,
+            sheet_name="",
+            filename=table.source_file,
+            source_id=source_id,
+            company_name=company_name,
+            company_id=company_id,
+            default_period=default_period,
+            statement_type_override=statement_type,
+            page_number=table.page_number,
+            table_index=table.table_index,
+        )
+
+
+def _normalized_label(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
+
+
+def _is_note_number(value: Decimal) -> bool:
+    return value == value.to_integral_value() and Decimal("0") <= value <= Decimal("99")
+
+
+def _table_periods(
     table: ExtractedTable,
     *,
     page_text: str,
     default_period: str | None,
-) -> dict[int, str]:
+) -> list[str]:
     candidates = [table.headers, *table.rows[:5]]
-    best: dict[int, str] = {}
+    best: list[str] = []
     for row in candidates:
-        years = {
-            index: period
-            for index, cell in enumerate(row)
-            if cell and (period := _fiscal_period(cell)) is not None
-        }
-        if len(years) > len(best):
-            best = years
+        periods = []
+        for cell in row:
+            if cell and (period := _fiscal_period(cell)) is not None:
+                if period not in periods:
+                    periods.append(period)
+        if len(periods) > len(best):
+            best = periods
 
-    numeric_columns = _numeric_table_columns(table)
     if best:
-        return {column: year for column, year in best.items() if column in numeric_columns}
-
+        return best
     inferred_period = default_period or _single_fiscal_year(page_text)
-    if inferred_period and len(numeric_columns) == 1:
-        return {numeric_columns[0]: inferred_period}
-    return {}
+    if inferred_period:
+        return [inferred_period]
+    return []
 
 
-def _numeric_table_columns(table: ExtractedTable) -> set[int]:
-    numeric_columns: set[int] = set()
-    for row in table.rows:
-        if not row or _canonical_metric(row[0]) is None:
+def _period_starts(
+    periods: list[str],
+    page_text: str,
+    statement_type: str,
+) -> dict[str, tuple[date, date]]:
+    period_marker = (
+        r"\bas\s+(?:at|of)\b"
+        if statement_type == "balance_sheet"
+        else r"\byear\s+ended\b"
+    )
+    if not re.search(period_marker, page_text, re.IGNORECASE):
+        return {}
+    day_first_dates = re.findall(
+        r"\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]+),?\s+(20\d{2})\b",
+        page_text,
+        re.IGNORECASE,
+    )
+    month_first_dates = re.findall(
+        r"\b([A-Za-z]+)\s+(\d{1,2}),?\s+(20\d{2})\b",
+        page_text,
+        re.IGNORECASE,
+    )
+    date_matches = [
+        (day, month, year) for day, month, year in day_first_dates
+    ] + [
+        (day, month, year) for month, day, year in month_first_dates
+    ]
+    if not date_matches:
+        return {}
+    parsed_dates: list[date] = []
+    for day_text, month_text, year_text in date_matches:
+        try:
+            month = datetime.strptime(month_text, "%B").month
+        except ValueError:
+            try:
+                month = datetime.strptime(month_text, "%b").month
+            except ValueError:
+                continue
+        try:
+            parsed_dates.append(date(int(year_text), month, int(day_text)))
+        except ValueError:
             continue
-        for index, cell in enumerate(row[1:], start=1):
-            if _pdf_amount(cell) is not None:
-                numeric_columns.add(index)
-    return numeric_columns
+    if not parsed_dates:
+        return {}
+
+    template = max(parsed_dates)
+    result: dict[str, tuple[date, date]] = {}
+    for period in periods:
+        year_match = re.fullmatch(r"FY(20\d{2})", period)
+        if year_match is None:
+            continue
+        year = int(year_match.group(1))
+        try:
+            end = date(year, template.month, template.day)
+            prior_end = end.replace(year=year - 1)
+            start = prior_end + timedelta(days=1)
+        except ValueError:
+            continue
+        result[period] = (start, end)
+    return result
 
 
 def _fiscal_period(value: str) -> str | None:
@@ -576,6 +729,8 @@ def _pdf_amount(value: Any) -> Decimal | None:
 
 
 def _currency_code(text: str) -> str | None:
+    if "₹" in text or re.search(r"\bINR\b|indian rupees?|rupees?", text, re.IGNORECASE):
+        return "INR"
     if "£" in text or re.search(r"\bGBP\b", text, re.IGNORECASE):
         return "GBP"
     if "$" in text or re.search(r"\bUSD\b", text, re.IGNORECASE):
@@ -589,6 +744,10 @@ def _currency_code(text: str) -> str | None:
 
 def _financial_unit(text: str) -> str:
     normalized = text.casefold()
+    if re.search(r"\bcrores?\b", normalized):
+        return "crore"
+    if re.search(r"\blakhs?\b", normalized):
+        return "lakhs"
     if re.search(r"\b(?:in\s+)?(?:millions?|mn)\b|[£$€¥]\s?m\b", normalized):
         return "millions"
     if re.search(r"\b(?:in\s+)?(?:thousands?|000s?)\b|[£$€¥]\s?000\b", normalized):
@@ -600,6 +759,8 @@ def _canonical_metric(value: Any) -> str | None:
     if value is None:
         return None
     label = re.sub(r"[^a-z0-9]+", " ", str(value).casefold()).strip()
+    label = re.sub(r"^(?:[a-z]|\(?[ivx]+\)?|\d+)\s+", "", label)
+    label = re.sub(r"(?:\s+[a-z]){2}$", "", label)
     for canonical, aliases in METRIC_ALIASES.items():
         candidates = (canonical.replace("_", " "), *aliases)
         if any(label == re.sub(r"[^a-z0-9]+", " ", alias.casefold()).strip()

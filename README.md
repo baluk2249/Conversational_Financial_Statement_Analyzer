@@ -185,8 +185,23 @@ structured store, with page and table-row provenance. Tables without a
 recognized statement heading or unambiguous period/value columns are not
 normalized. PDF table extraction is layout-dependent, so verify uploaded
 statements and warnings rather than assuming every annual-report layout was
-parsed successfully. Exact figures remain in the structured store; FAISS
-continues to index narrative page text only.
+parsed successfully. When both consolidated and standalone statements are
+present, financial facts are taken from the consolidated statements only.
+Date-based period headers, note columns, and INR/lakhs metadata are supported
+for common Indian annual-report layouts. Exact figures remain in the structured
+store; FAISS continues to index narrative page text only.
+
+Regenerate the synthetic, selectable-text PDF fixtures with:
+
+```powershell
+python scripts/generate_sample_financial_pdfs.py
+```
+
+The generated files under `tests/fixtures/pdfs/` contain synthetic test data
+only; they do not represent figures from a real company. The Northstar, Cedar,
+and Orbit demo PDFs include three dated fiscal periods so the web experience
+can exercise average-balance ratios, period comparisons, and red-flag
+detections with sufficient evidence.
 
 Run the tests and the synthetic demo with:
 
@@ -208,6 +223,9 @@ and optionally existing `ComputedMetric` records. It calculates supported
 liquidity, leverage, profitability, and efficiency ratios with `Decimal`, then
 compares adjacent periods and evaluates the six configured red-flag families.
 It does not use an LLM for formulas, period deltas, or rule decisions.
+Interest coverage and inventory days use the magnitude of reported expense
+values so parentheses/negative presentation does not reverse those ratios;
+the affected calculations use version 2 formula identifiers.
 
 ```python
 from agents.trend_red_flag import TrendRedFlagAgent
@@ -253,6 +271,16 @@ and warnings in that bundle. Citations are built from source metadata and
 calculated metrics are cited through their input fact references. A post-
 generation validator rejects unsupported numeric claims, unresolved citations,
 and causal statements that are not supported by retrieved narrative evidence.
+
+The Financial Ratios subsections, Red Flags view, and Company Comparison view
+offer explicit AI-summary actions. These summaries reuse the deterministic
+analysis results and comparison compatibility statuses; generated figures and
+citations must pass the same evidence validation. The summary actions require a
+configured LLM provider and report provider or validation failures rather than
+substituting deterministic text labeled as an AI summary. Summaries avoid
+repeating numeric values and fiscal years already shown with citations in the
+dashboard. Their request contracts are available in the FastAPI OpenAPI
+documentation.
 
 The deterministic formatter handles exact facts, metrics, trends, red flags,
 and insufficient-evidence responses if no model is configured or a provider

@@ -3,6 +3,7 @@
 from ingestion.parsers import (
     DocumentProcessingError,
     IngestionResult,
+    PDFFinancialFactAdapter,
     UnsupportedDocumentType,
     parse_document,
 )
@@ -19,6 +20,7 @@ __all__ = [
     "IngestionResult",
     "PDFTableExtractionError",
     "PDFTableExtractor",
+    "PDFFinancialFactAdapter",
     "UnsupportedDocumentType",
     "detect_statement_type",
     "parse_document",

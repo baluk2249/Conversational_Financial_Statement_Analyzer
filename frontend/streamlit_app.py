@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Callable
+from decimal import Decimal
 from typing import Any
 
 import streamlit as st
@@ -65,11 +68,13 @@ def main() -> None:
         item["company_id"]: item["company_name"] for item in companies
     }
     company_ids = list(company_names)
+    company_labels = _company_display_labels(company_ids, company_names)
     with st.sidebar:
         company_id = st.selectbox(
             "Company",
             company_ids,
-            format_func=lambda value: company_names[value],
+            format_func=lambda value: company_labels[value],
+            key="selected_company_id",
         )
         try:
             periods = client.get_periods(company_id)
@@ -163,6 +168,8 @@ def _ratios(
             metric = returned.get(name)
             if metric is None or metric.get("value") is None:
                 value = "Not available"
+            elif metric.get("display_unit") == "percent":
+                value = f"{Decimal(str(metric['value'])) * 100:.2f}%"
             else:
                 value = f"{metric['value']} {metric['display_unit']}"
             columns[index % len(columns)].metric(name.replace("_", " ").title(), value)
@@ -174,6 +181,12 @@ def _ratios(
                 columns[index % len(columns)].caption(
                     ", ".join(metric.get("warnings", [])) or "Insufficient evidence"
                 )
+        _summary_action(
+            f"ratio-summary:{company_id}:{period or 'latest'}:{section}",
+            lambda section=section: client.summarize_ratio_section(
+                company_id, section, period
+            ),
+        )
 
 
 def _red_flags(
@@ -199,6 +212,10 @@ def _red_flags(
         _citations(flag.get("citations", []))
     if not result.get("red_flags"):
         st.info("No red-flag results are available for this period.")
+    _summary_action(
+        f"red-flag-summary:{company_id}:{period or 'latest'}",
+        lambda: client.summarize_red_flags(company_id, period),
+    )
 
 
 def _comparison(
@@ -215,13 +232,19 @@ def _comparison(
         "Company A",
         company_ids,
         index=company_ids.index(selected_company),
-        format_func=lambda value: company_names[value],
+        format_func=lambda value: _company_display_labels(
+            company_ids, company_names
+        )[value],
+        key="comparison_company_a",
     )
     second_choices = [value for value in company_ids if value != first]
     second = st.selectbox(
         "Company B",
         second_choices,
-        format_func=lambda value: company_names[value],
+        format_func=lambda value: _company_display_labels(
+            second_choices, company_names
+        )[value],
+        key="comparison_company_b",
     )
     try:
         periods_a = client.get_periods(first)
@@ -244,18 +267,34 @@ def _comparison(
             "dso", "inventory_days", "asset_turnover",
         ],
     )
-    if not st.button("Compare"):
-        return
-    try:
-        result = client.compare_companies(
-            first,
-            second,
-            metrics or None,
-            None if period_a_label == "Latest available" else period_a_label,
-            None if period_b_label == "Latest available" else period_b_label,
-        )
-    except AnalyzerAPIError as exc:
-        st.error(str(exc))
+    compare_clicked = st.button("Compare")
+    summarize_clicked = st.button("Compare and generate AI summary")
+    selected_period_a = (
+        None if period_a_label == "Latest available" else period_a_label
+    )
+    selected_period_b = (
+        None if period_b_label == "Latest available" else period_b_label
+    )
+    result_key = (
+        f"comparison-result:{first}:{second}:"
+        f"{selected_period_a or 'latest'}:{selected_period_b or 'latest'}:"
+        f"{','.join(metrics)}"
+    )
+    summary_key = f"comparison-summary:{result_key}"
+    if compare_clicked or summarize_clicked:
+        try:
+            st.session_state[result_key] = client.compare_companies(
+                first,
+                second,
+                metrics or None,
+                selected_period_a,
+                selected_period_b,
+            )
+        except AnalyzerAPIError as exc:
+            st.error(str(exc))
+            return
+    result = st.session_state.get(result_key)
+    if result is None:
         return
     for item in result.get("metrics", []):
         left = item.get("company_a")
@@ -267,15 +306,64 @@ def _comparison(
         )
     for warning in result.get("warnings", []):
         st.warning(f"{warning['code']}: {warning['message']}")
+    if summarize_clicked:
+        st.session_state.pop(summary_key, None)
+        try:
+            st.session_state[summary_key] = client.summarize_comparison(
+                first, second, metrics or None, selected_period_a, selected_period_b
+            )["summary"]
+        except AnalyzerAPIError as exc:
+            st.error(str(exc))
+    if summary_key in st.session_state:
+        st.markdown("**AI summary**")
+        st.info(st.session_state[summary_key])
+
+
+def _summary_action(
+    key: str, generate_summary: Callable[[], dict[str, Any]]
+) -> None:
+    summary_state_key = f"{key}:value"
+    if st.button("Generate AI summary", key=f"{key}:generate"):
+        st.session_state.pop(summary_state_key, None)
+        try:
+            result = generate_summary()
+        except AnalyzerAPIError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state[summary_state_key] = result["summary"]
+    if summary_state_key in st.session_state:
+        st.markdown("**AI summary**")
+        st.info(st.session_state[summary_state_key])
 
 
 def _comparison_value(value: dict[str, Any] | None) -> str:
     if value is None:
         return "Not available"
     unit = value.get("display_unit") or value.get("unit") or ""
-    text = f"{value.get('value')} {unit}".strip()
+    amount = Decimal(str(value["value"]))
+    text = (
+        f"{amount * 100:.2f}%"
+        if unit == "percent"
+        else f"{amount} {unit}".strip()
+    )
     citations = value.get("citations", [])
     return text + (f" ({' '.join(citations)})" if citations else "")
+
+
+def _company_display_labels(
+    company_ids: list[str], company_names: dict[str, str]
+) -> dict[str, str]:
+    name_counts = Counter(
+        company_names[company_id].casefold() for company_id in company_ids
+    )
+    return {
+        company_id: (
+            f"{company_names[company_id]} ({company_id})"
+            if name_counts[company_names[company_id].casefold()] > 1
+            else company_names[company_id]
+        )
+        for company_id in company_ids
+    }
 
 
 def _citations(citations: list[str]) -> None:

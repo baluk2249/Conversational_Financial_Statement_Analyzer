@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from agents.comparison.schemas import ComparisonResult
-from agents.narrative_qa.citation_validator import CitationValidator
+from agents.narrative_qa.citation_validator import (
+    CitationValidator,
+    ValidationResult,
+)
 from agents.narrative_qa.formatters import (
     SafeFallbackFormatter,
     is_causal_question,
@@ -20,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 class NarrativeAnswerError(RuntimeError):
     """Raised if neither generated nor deterministic output passes validation."""
+
+
+class NarrativeSummaryError(RuntimeError):
+    """Raised when an evidence-validated LLM summary cannot be produced."""
+
+    def __init__(self, message: str, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class NarrativeQAAgent:
@@ -100,6 +112,90 @@ class NarrativeQAAgent:
             "; ".join(validation.errors),
         )
         return self._validated_comparison_fallback(result)
+
+    def summarize(
+        self, evidence: AnswerEvidence, *, section: str
+    ) -> str:
+        """Generate a summary only when a configured model passes validation."""
+        system_prompt, user_prompt = self.prompt_builder.build_summary(
+            evidence, section
+        )
+        return self._generate_validated_summary(
+            system_prompt,
+            user_prompt,
+            lambda draft: self.citation_validator.validate_summary(
+                draft, evidence
+            ),
+            "narrative",
+        )
+
+    def summarize_comparison(self, result: ComparisonResult) -> str:
+        """Summarize verified comparison output without weakening its safeguards."""
+        system_prompt, user_prompt = (
+            self.prompt_builder.build_comparison_summary(result)
+        )
+        return self._generate_validated_summary(
+            system_prompt,
+            user_prompt,
+            lambda draft: self.citation_validator.validate_comparison_summary(
+                draft, result
+            ),
+            "comparison",
+        )
+
+    def _generate_validated_summary(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        validate: Callable[[str], ValidationResult],
+        summary_type: str,
+    ) -> str:
+        if self.llm_client is None:
+            raise NarrativeSummaryError(
+                "LLM summaries are unavailable because no model provider is configured.",
+                503,
+            )
+        try:
+            draft = self.llm_client.generate(system_prompt, user_prompt)
+            validation = validate(draft)
+            if not validation.valid:
+                logger.warning(
+                    "Rejected ungrounded %s summary: %s",
+                    summary_type,
+                    "; ".join(validation.errors),
+                )
+                retry_system_prompt = (
+                    system_prompt
+                    + "\nThe previous draft failed evidence validation. "
+                    "Rewrite it from scratch. Do not include numeric values or "
+                    "period years. Remove unsupported claims and mention only "
+                    "metric names, evidence-backed statuses, and limitations."
+                )
+                draft = self.llm_client.generate(
+                    retry_system_prompt,
+                    user_prompt
+                    + "\n\nProduce a corrected replacement summary. Do not "
+                    "include any numeric value, period year, or claim that "
+                    "cannot be supported by the supplied evidence.",
+                )
+                validation = validate(draft)
+        except LLMProviderError as exc:
+            logger.exception("%s summary provider failed", summary_type.title())
+            raise NarrativeSummaryError(
+                "The configured model provider could not generate a summary.",
+                503,
+            ) from exc
+        if not validation.valid:
+            logger.warning(
+                "Rejected %s summary after correction attempt: %s",
+                summary_type,
+                "; ".join(validation.errors),
+            )
+            raise NarrativeSummaryError(
+                "The generated summary did not pass evidence validation.",
+                502,
+            )
+        return draft.strip()
 
     def _validated_fallback(self, evidence: AnswerEvidence) -> str:
         answer = self.fallback_formatter.format(evidence)
