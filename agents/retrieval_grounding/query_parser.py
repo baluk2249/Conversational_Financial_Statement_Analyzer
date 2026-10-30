@@ -52,6 +52,13 @@ class DeterministicQueryParser:
         )
         if wants_red_flags:
             wants_trends = True
+        if wants_trends and not wants_red_flags and not facts and not computed:
+            computed = tuple(COMPUTED_METRIC_INPUTS)
+            facts.extend(
+                line_item
+                for metric_name in computed
+                for line_item in COMPUTED_METRIC_INPUTS[metric_name]
+            )
 
         periods = list(dict.fromkeys(re.findall(r"\bFY\s?\d{4}\b", question, flags=re.IGNORECASE)))
         periods = [re.sub(r"\s+", "", item).upper() for item in periods]

@@ -230,6 +230,66 @@ def test_trend_question_retrieves_prior_period_facts(store: SQLiteFinancialStore
     assert [trend.trend_id for trend in result.trends] == ["t1"]
 
 
+def test_broad_trend_question_calculates_supported_ratio_trends(
+    store: SQLiteFinancialStore,
+) -> None:
+    store.add_fact(
+        make_fact("abc", "current_assets", "FY2024", "150", statement="balance_sheet")
+    )
+    store.add_fact(
+        make_fact("abc", "current_liabilities", "FY2024", "100", statement="balance_sheet")
+    )
+    store.add_fact(
+        make_fact("abc", "current_assets", "FY2025", "200", statement="balance_sheet")
+    )
+    store.add_fact(
+        make_fact("abc", "current_liabilities", "FY2025", "100", statement="balance_sheet")
+    )
+
+    result = RetrievalGroundingAgent(store).retrieve_context(
+        "What are the financial trends?", "abc",
+    )
+
+    current_ratio_trend = next(
+        trend for trend in result.trends
+        if trend.metric_name == "current_ratio"
+    )
+    assert result.status == "OK"
+    assert current_ratio_trend.quality_status == "VALID"
+    assert current_ratio_trend.from_period == "FY2024"
+    assert current_ratio_trend.to_period == "FY2025"
+    assert current_ratio_trend.from_value == Decimal("1.5000")
+    assert current_ratio_trend.to_value == Decimal("2.0000")
+    assert len(current_ratio_trend.supporting_refs) == 2
+    referenced_metrics = {
+        metric.metric_id: metric for metric in result.computed_metrics
+    }
+    assert all(ref in referenced_metrics for ref in current_ratio_trend.supporting_refs)
+    assert all(
+        fact_id in {fact.fact_id for fact in result.facts}
+        for ref in current_ratio_trend.supporting_refs
+        for fact_id in referenced_metrics[ref].input_fact_refs
+    )
+
+
+def test_trend_question_without_two_periods_is_insufficient(
+    store: SQLiteFinancialStore,
+) -> None:
+    store.add_fact(
+        make_fact("abc", "current_assets", "FY2025", "200", statement="balance_sheet")
+    )
+    store.add_fact(
+        make_fact("abc", "current_liabilities", "FY2025", "100", statement="balance_sheet")
+    )
+
+    result = RetrievalGroundingAgent(store).retrieve_context(
+        "What are the financial trends?", "abc",
+    )
+
+    assert result.status == "INSUFFICIENT_EVIDENCE"
+    assert result.trends == []
+
+
 class DeterministicTestEmbedder:
     """Small deterministic vectors keep FAISS tests local and model-free."""
 

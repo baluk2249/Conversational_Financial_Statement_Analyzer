@@ -151,6 +151,72 @@ def test_multi_period_trend_uses_trend_lineage() -> None:
     assert "[Income Statement | FY2025 | Operating Profit | p.22]" in answer
 
 
+def test_broad_trend_fallback_reports_only_supported_changes() -> None:
+    before_fact = make_fact("current_assets", "150", "FY2024", page=2)
+    before_liabilities = make_fact("current_liabilities", "100", "FY2024", page=3)
+    after_fact = make_fact("current_assets", "200", "FY2025", page=4)
+    after_liabilities = make_fact("current_liabilities", "100", "FY2025", page=5)
+    before = make_metric(
+        "current_ratio", "FY2024", "1.5000",
+        [before_fact.fact_id, before_liabilities.fact_id],
+    )
+    after = make_metric(
+        "current_ratio", "FY2025", "2.0000",
+        [after_fact.fact_id, after_liabilities.fact_id],
+    )
+    trend = TrendResult(
+        trend_id="trend-current-ratio",
+        company_id="abc",
+        metric_name="current_ratio",
+        from_period="FY2024",
+        to_period="FY2025",
+        from_value="1.5000",
+        to_value="2.0000",
+        delta="0.5000",
+        supporting_refs=[before.metric_id, after.metric_id],
+    )
+    evidence = AnswerEvidence(
+        question="What are the financial trends?",
+        company_id="abc",
+        periods=["FY2024", "FY2025"],
+        facts=[before_fact, before_liabilities, after_fact, after_liabilities],
+        computed_metrics=[before, after],
+        trends=[trend],
+    )
+
+    answer = NarrativeQAAgent().answer(evidence)
+
+    assert "Financial trends by area:" in answer
+    assert "- Liquidity:" in answer
+    assert "- Current Ratio increased in each period:" in answer
+    assert (
+        "  - FY2024: 1.5000 "
+        "[Income Statement | FY2024 | Current Assets | p.2]"
+    ) in answer
+    assert (
+        "  - FY2025: 2.0000 "
+        "[Income Statement | FY2025 | Current Assets | p.4]"
+    ) in answer
+    assert "[Income Statement | FY2025 | Current Liabilities | p.5]" in answer
+
+
+def test_trend_fallback_explains_single_period_limit() -> None:
+    evidence = AnswerEvidence(
+        status="INSUFFICIENT_EVIDENCE",
+        question="What are the financial trends?",
+        company_id="abc",
+        periods=["FY2025"],
+        insufficient_evidence=InsufficientEvidence(
+            requested_item="financial trends"
+        ),
+    )
+
+    answer = SafeFallbackFormatter().format(evidence)
+
+    assert "available evidence covers only FY2025" in answer
+    assert "at least two reporting periods" in answer
+
+
 def test_triggered_red_flag_is_explained_without_inventing_a_value() -> None:
     fact = make_fact("operating_profit", "10")
     trend = TrendResult(
@@ -253,6 +319,125 @@ def test_llm_output_with_fabricated_citation_is_replaced_by_fallback() -> None:
 
     assert "p.12" in answer
     assert "p.999" not in answer
+
+
+def test_fallback_deduplicates_repeated_facts_with_same_source() -> None:
+    fact = make_fact("revenue", "12000000", page=1)
+    duplicate = make_fact("revenue", "12000000", page=1, fact_id="duplicate")
+    evidence = AnswerEvidence(
+        question="What was revenue for FY2025?",
+        company_id="abc",
+        facts=[fact, duplicate],
+    )
+
+    answer = SafeFallbackFormatter().format(evidence)
+
+    assert answer.count("Reported Revenue") == 1
+    assert answer.count("[Income Statement | FY2025 | Revenue | p.1]") == 1
+
+
+def test_fallback_groups_financial_facts_and_formats_units_readably() -> None:
+    revenue = make_fact("revenue", "120.0", "FY2023", unit="millions", page=1)
+    cost_of_goods_sold = make_fact(
+        "cost_of_goods_sold", "-70.0", "FY2023", unit="millions", page=1
+    )
+    receivables = make_fact(
+        "accounts_receivable", "15.0", "FY2023", unit="millions", page=2
+    ).model_copy(update={"statement_type": "balance_sheet"})
+    net_income = make_fact(
+        "net_income", "15.0", "FY2023", unit="millions", page=1
+    )
+    cash_flow_net_income = make_fact(
+        "net_income", "15.0", "FY2023", unit="millions", page=3,
+        fact_id="abc-net-income-cash-flow-FY2023",
+    ).model_copy(update={"statement_type": "cash_flow_statement"})
+    evidence = AnswerEvidence(
+        question="Show the FY2023 financial information",
+        company_id="abc",
+        facts=[
+            revenue,
+            cost_of_goods_sold,
+            receivables,
+            net_income,
+            cash_flow_net_income,
+        ],
+    )
+
+    answer = NarrativeQAAgent().answer(evidence)
+
+    assert "Reported figures, grouped by period and statement:" in answer
+    assert "- FY2023 income statement:" in answer
+    assert "- FY2023 balance sheet:" in answer
+    assert (
+        "Reported Revenue was £120.0 million "
+        "[Income Statement | FY2023 | Revenue | p.1]"
+    ) in answer
+    assert "Reported Cost of Goods Sold was -£70.0 million" in answer
+    assert (
+        "Reported Accounts Receivable was £15.0 million "
+        "[Balance Sheet | FY2023 | Accounts Receivable | p.2]"
+    ) in answer
+    assert answer.count("Reported Net Income was £15.0 million") == 2
+    assert "[Income Statement | FY2023 | Net Income | p.1]" in answer
+    assert "[Cash Flow Statement | FY2023 | Net Income | p.3]" in answer
+    assert "(unit: millions)" not in answer
+
+
+def test_validator_accepts_values_scaled_by_reported_fact_unit() -> None:
+    fact = make_fact("revenue", "120.0", "FY2023", unit="millions", page=1)
+    evidence = AnswerEvidence(
+        question="What was revenue in FY2023?",
+        company_id="abc",
+        facts=[fact],
+    )
+    answer = (
+        "Revenue was £120.0 million "
+        "[Income Statement | FY2023 | Revenue | p.1]."
+    )
+
+    validation = CitationValidator().validate(answer, evidence)
+
+    assert validation.valid
+    assert validation.errors == []
+
+
+def test_llm_answer_retries_once_to_correct_missing_numeric_citation() -> None:
+    fact = make_fact("revenue", "12000000")
+    evidence = AnswerEvidence(
+        question="What was revenue?",
+        company_id="abc",
+        facts=[fact],
+    )
+
+    class SequenceClient:
+        def __init__(self) -> None:
+            self.completions = [
+                "Revenue was £15,000,000.",
+                "Revenue was £12,000,000 "
+                "[Income Statement | FY2025 | Revenue | p.12].",
+            ]
+            self.calls = 0
+            self.retry_system_prompt = ""
+            self.retry_user_prompt = ""
+
+        def generate(self, system_prompt: str, user_prompt: str) -> str:
+            self.calls += 1
+            if self.calls == 2:
+                self.retry_system_prompt = system_prompt
+                self.retry_user_prompt = user_prompt
+            return self.completions.pop(0)
+
+    client = SequenceClient()
+    answer = NarrativeQAAgent(llm_client=client).answer(evidence)
+
+    assert answer == (
+        "Revenue was £12,000,000 "
+        "[Income Statement | FY2025 | Revenue | p.12]."
+    )
+    assert client.calls == 2
+    assert "previous draft failed evidence validation" in client.retry_system_prompt
+    assert "citation immediately" in client.retry_system_prompt
+    assert "corrected replacement answer" in client.retry_user_prompt
 
 
 @pytest.mark.parametrize("warning", ["CURRENCY_MISMATCH", "FISCAL_PERIOD_MISMATCH"])
@@ -506,12 +691,13 @@ def test_summary_requires_provider_and_rejects_unsupported_figures() -> None:
 
     agent = NarrativeQAAgent(
         llm_client=StaticClient(
-            "Current assets are £999 [Balance Sheet | FY2025 | Current Assets | p.12]."
+            "Current assets are £999 [Income Statement | FY2025 | Current Assets | p.12]."
         )
     )
-    with pytest.raises(NarrativeSummaryError, match="evidence validation") as rejected:
-        agent.summarize(evidence, section="Liquidity")
-    assert rejected.value.status_code == 502
+    summary = agent.summarize(evidence, section="Liquidity")
+    assert "£999" not in summary
+    assert "No liquidity measures could be calculated" in summary
+    assert "direction of change cannot be assessed" in summary
 
 
 def test_summary_validator_rejects_figures_unproven_trends_and_flags() -> None:
@@ -578,6 +764,47 @@ def test_summary_retries_once_when_first_draft_fails_validation() -> None:
 
     assert "current ratio" in summary.casefold()
     assert client.calls == 2
+
+
+def test_summary_returns_validated_fallback_when_both_drafts_fail() -> None:
+    assets = make_fact("current_assets", "150", page=2)
+    liabilities = make_fact("current_liabilities", "100", page=3)
+    evidence = AnswerEvidence(
+        question="Summarize Liquidity.",
+        company_id="abc",
+        facts=[assets, liabilities],
+        computed_metrics=[
+            make_metric(
+                "current_ratio",
+                "FY2025",
+                "1.5000",
+                [assets.fact_id, liabilities.fact_id],
+            )
+        ],
+    )
+
+    class InvalidDraftClient:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.retry_system_prompt = ""
+
+        def generate(self, system_prompt: str, user_prompt: str) -> str:
+            del user_prompt
+            self.calls += 1
+            if self.calls == 2:
+                self.retry_system_prompt = system_prompt
+            return "The current ratio was 9.0."
+
+    client = InvalidDraftClient()
+    summary = NarrativeQAAgent(llm_client=client).summarize(
+        evidence, section="Liquidity"
+    )
+
+    assert client.calls == 2
+    assert "must not repeat numeric values" in client.retry_system_prompt
+    assert "Available liquidity measures include current ratio." in summary
+    assert "No period-over-period trend evidence" in summary
+    assert "9.0" not in summary
 
 
 class StaticClient:

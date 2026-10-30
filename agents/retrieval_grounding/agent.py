@@ -6,13 +6,14 @@ import logging
 import re
 from collections.abc import Sequence
 
-from finance.ratios import RatioCalculator
+from agents.trend_red_flag.trends import analyse_trends
 from agents.retrieval_grounding.config import METRIC_ALIASES
 from models.schemas import (
     AnswerEvidence,
     ComputedMetric,
     InsufficientEvidence,
 )
+from finance.ratios import RatioCalculator
 from retrieval.interfaces import (
     NarrativeVectorStore,
     NarrativeStoreUnavailableError,
@@ -107,6 +108,24 @@ class RetrievalGroundingAgent:
             ) if trend.company_id == company_id
                 and (requested_periods is None or trend.to_period in requested_periods)
                 and (not intent.computed_metrics or trend.metric_name in intent.computed_metrics)]
+            existing_trends = {
+                (trend.metric_name, trend.from_period, trend.to_period)
+                for trend in trends
+            }
+            for metric_name in intent.computed_metrics:
+                for trend in analyse_trends(
+                    company_id, metric_name, available_periods, computed
+                ):
+                    key = (trend.metric_name, trend.from_period, trend.to_period)
+                    if (
+                        key not in existing_trends
+                        and (
+                            requested_periods is None
+                            or trend.to_period in requested_periods
+                        )
+                    ):
+                        trends.append(trend)
+                        existing_trends.add(key)
         if intent.wants_red_flags and self.result_provider:
             red_flags = [flag for flag in self.result_provider.get_red_flags(
                 company_id, periods=query_periods,
@@ -144,6 +163,15 @@ class RetrievalGroundingAgent:
             company_name = narrative[0].company_name
         output_periods = query_periods or available_periods
         missing_inputs = self._missing_inputs(intent.computed_metrics, computed)
+        has_valid_trend = any(
+            trend.quality_status == "VALID" for trend in trends
+        )
+        broad_trend_overview = (
+            intent.wants_trends
+            and not intent.wants_red_flags
+            and intent.requested_item is None
+            and has_valid_trend
+        )
         if narrative_unavailable:
             warnings.append("NARRATIVE_RETRIEVAL_UNAVAILABLE")
             warnings = list(dict.fromkeys(warnings))
@@ -158,9 +186,18 @@ class RetrievalGroundingAgent:
             metric.metric_name in intent.computed_metrics and metric.value is None
             for metric in computed
         )
+        trend_unavailable = (
+            intent.wants_trends
+            and not intent.wants_red_flags
+            and not has_valid_trend
+        )
         insufficient = (
-            no_requested_fact or unsupported_exact or bool(missing_inputs)
-            or unavailable_requested_metric or qualitative_empty
+            no_requested_fact
+            or unsupported_exact
+            or (bool(missing_inputs) and not broad_trend_overview)
+            or (unavailable_requested_metric and not broad_trend_overview)
+            or qualitative_empty
+            or trend_unavailable
         )
 
         insufficient_detail = None

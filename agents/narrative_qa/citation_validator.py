@@ -8,11 +8,11 @@ from decimal import Decimal, InvalidOperation
 
 from agents.narrative_qa.citation_builder import CitationBuilder
 from agents.comparison.schemas import ComparisonResult
-from models.schemas import AnswerEvidence, ComputedMetric, TrendResult
+from models.schemas import AnswerEvidence, ComputedMetric, FinancialFact, TrendResult
 
 CITATION_PATTERN = re.compile(r"\[[^\[\]]+\]")
 NUMBER_PATTERN = re.compile(
-    r"(?<!\w)(?:[£$€¥]\s*)?-?(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
+    r"(?<!\w)-?(?:[£$€¥]\s*)?(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
     r"(?:[eE][+-]?\d+)?"
     r"(?:\s*(?:%|x|[kKmMbB]|thousands?|millions?|billions?|trillions?))?"
     r"(?!\w)",
@@ -220,7 +220,7 @@ class CitationValidator:
             if fact.company_id != evidence.company_id:
                 continue
             citation = self.citations.fact_citation(fact)
-            values.setdefault(citation, set()).add(fact.value)
+            values.setdefault(citation, set()).update(_fact_values(fact))
 
         for metric in evidence.computed_metrics:
             if (
@@ -317,6 +317,22 @@ def _metric_values(metric: ComputedMetric) -> set[Decimal]:
     if metric.display_unit == "percent":
         values.add(metric.value * Decimal("100"))
     return values
+
+
+def _fact_values(fact: FinancialFact) -> set[Decimal]:
+    value = fact.value
+    unit = fact.unit.casefold().strip()
+    multiplier = {
+        "thousand": Decimal("1000"),
+        "thousands": Decimal("1000"),
+        "million": Decimal("1000000"),
+        "millions": Decimal("1000000"),
+        "billion": Decimal("1000000000"),
+        "billions": Decimal("1000000000"),
+        "trillion": Decimal("1000000000000"),
+        "trillions": Decimal("1000000000000"),
+    }.get(unit, Decimal("1"))
+    return {value, value * multiplier}
 
 
 def _trend_values(

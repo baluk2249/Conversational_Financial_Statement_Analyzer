@@ -77,7 +77,37 @@ class NarrativeQAAgent:
         if validation.valid:
             return draft
         logger.warning(
-            "Rejected ungrounded narrative answer: %s", "; ".join(validation.errors)
+            "Rejected ungrounded narrative answer; retrying once: %s",
+            "; ".join(validation.errors),
+        )
+        retry_system_prompt = (
+            system_prompt
+            + "\nThe previous draft failed evidence validation for these reasons: "
+            + "; ".join(validation.errors)
+            + ". Rewrite it from scratch using only supported evidence. Put the "
+            "exact source citation immediately after each financial number. "
+            "Do not use numbered lists or introduce unsupported figures."
+        )
+        try:
+            draft = self.llm_client.generate(
+                retry_system_prompt,
+                user_prompt
+                + "\n\nProduce a corrected replacement answer. Every financial "
+                "number must have its exact supporting citation immediately "
+                "after it.",
+            )
+        except LLMProviderError:
+            logger.exception(
+                "Narrative provider failed during citation-correction retry; "
+                "using deterministic evidence fallback"
+            )
+            return self._validated_fallback(evidence)
+        validation = self.citation_validator.validate(draft, evidence)
+        if validation.valid:
+            return draft
+        logger.warning(
+            "Rejected ungrounded narrative answer after correction retry: %s",
+            "; ".join(validation.errors),
         )
         return self._validated_fallback(evidence)
 
@@ -126,6 +156,7 @@ class NarrativeQAAgent:
             lambda draft: self.citation_validator.validate_summary(
                 draft, evidence
             ),
+            lambda: self.fallback_formatter.format_summary(evidence, section),
             "narrative",
         )
 
@@ -140,6 +171,7 @@ class NarrativeQAAgent:
             lambda draft: self.citation_validator.validate_comparison_summary(
                 draft, result
             ),
+            lambda: self.fallback_formatter.format_comparison_summary(result),
             "comparison",
         )
 
@@ -148,6 +180,7 @@ class NarrativeQAAgent:
         system_prompt: str,
         user_prompt: str,
         validate: Callable[[str], ValidationResult],
+        fallback: Callable[[], str],
         summary_type: str,
     ) -> str:
         if self.llm_client is None:
@@ -166,8 +199,11 @@ class NarrativeQAAgent:
                 )
                 retry_system_prompt = (
                     system_prompt
-                    + "\nThe previous draft failed evidence validation. "
-                    "Rewrite it from scratch. Do not include numeric values or "
+                    + "\nThe previous draft failed evidence validation for "
+                    "these reasons: "
+                    + "; ".join(validation.errors)
+                    + ". Rewrite it from scratch. "
+                    "Do not include numeric values or "
                     "period years. Remove unsupported claims and mention only "
                     "metric names, evidence-backed statuses, and limitations."
                 )
@@ -187,14 +223,20 @@ class NarrativeQAAgent:
             ) from exc
         if not validation.valid:
             logger.warning(
-                "Rejected %s summary after correction attempt: %s",
+                "Rejected %s summary after correction attempt; using "
+                "evidence-only fallback: %s",
                 summary_type,
                 "; ".join(validation.errors),
             )
-            raise NarrativeSummaryError(
-                "The generated summary did not pass evidence validation.",
-                502,
-            )
+            draft = fallback()
+            validation = validate(draft)
+            if not validation.valid:
+                raise NarrativeSummaryError(
+                    "Neither the generated summary nor its evidence-only "
+                    "fallback passed validation: "
+                    + "; ".join(validation.errors),
+                    502,
+                )
         return draft.strip()
 
     def _validated_fallback(self, evidence: AnswerEvidence) -> str:

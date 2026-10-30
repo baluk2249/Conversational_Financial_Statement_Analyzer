@@ -25,7 +25,14 @@ class SafeFallbackFormatter:
         self.citations = citation_builder or CitationBuilder()
 
     def format(self, evidence: AnswerEvidence) -> str:
-        if evidence.status == "INSUFFICIENT_EVIDENCE":
+        trend_request = (
+            _is_trend_question(evidence.question)
+            and not _is_comparison_question(evidence.question)
+            and not is_causal_question(evidence.question)
+        )
+        if evidence.status == "INSUFFICIENT_EVIDENCE" and trend_request:
+            answer = self._format_trend_answer(evidence)
+        elif evidence.status == "INSUFFICIENT_EVIDENCE":
             answer = self._insufficient(evidence)
         elif _is_estimation_question(evidence.question):
             answer = (
@@ -55,12 +62,15 @@ class SafeFallbackFormatter:
                 "A comparison cannot be established because this evidence bundle "
                 "does not include verified, company-scoped comparison results."
             )
+        elif trend_request:
+            answer = self._format_trend_answer(evidence)
         else:
-            statements = [
-                self._format_fact(fact)
-                for fact in evidence.facts
-                if fact.company_id == evidence.company_id
-            ]
+            statements = self._format_facts(
+                [
+                    fact for fact in evidence.facts
+                    if fact.company_id == evidence.company_id
+                ]
+            )
             statements.extend(
                 self._format_metric(metric, evidence)
                 for metric in evidence.computed_metrics
@@ -77,11 +87,338 @@ class SafeFallbackFormatter:
                 if flag.company_id == evidence.company_id
             )
             statements = [statement for statement in statements if statement]
+            statements = list(dict.fromkeys(statements))
             answer = " ".join(statements) or (
                 "The available evidence does not establish the requested "
                 "financial information."
             )
         return append_warnings(answer, evidence)
+
+    def _format_facts(self, facts: list[FinancialFact]) -> list[str]:
+        if not facts:
+            return []
+        if len(facts) == 1:
+            return [self._format_fact(facts[0])]
+
+        grouped_measurements: dict[tuple[object, ...], list[FinancialFact]] = {}
+        for fact in facts:
+            key = (
+                fact.fiscal_year,
+                fact.canonical_line_item,
+                fact.value,
+                fact.currency,
+                fact.unit,
+                fact.period_start,
+                fact.period_end,
+                fact.fiscal_year_end,
+                fact.metric_definition,
+                fact.statement_type,
+            )
+            grouped_measurements.setdefault(key, []).append(fact)
+
+        statement_order = {
+            "income_statement": 0,
+            "balance_sheet": 1,
+            "cash_flow_statement": 2,
+        }
+        statements_by_group: dict[tuple[str, str], list[str]] = {}
+        for measurement_facts in grouped_measurements.values():
+            primary_fact = min(
+                measurement_facts,
+                key=lambda fact: statement_order.get(fact.statement_type, 3),
+            )
+            citations = list(dict.fromkeys(
+                self.citations.fact_citation(fact)
+                for fact in measurement_facts
+            ))
+            label = _humanize_label(primary_fact.canonical_line_item)
+            amount = _format_fact_amount(primary_fact)
+            statements_by_group.setdefault(
+                (primary_fact.fiscal_year, primary_fact.statement_type), []
+            ).append(
+                f"Reported {label} was {amount} {' '.join(citations)}"
+            )
+
+        ordered_groups = sorted(
+            statements_by_group.items(),
+            key=lambda item: (
+                item[0][0],
+                statement_order.get(item[0][1], 3),
+                item[0][1],
+            ),
+        )
+        formatted = ["Reported figures, grouped by period and statement:"]
+        for (period, statement_type), entries in ordered_groups:
+            statement_name = _statement_label(statement_type)
+            formatted.append(
+                f"- {period} {statement_name}: {'; '.join(entries)}."
+            )
+        return formatted
+
+    def _format_trend_answer(self, evidence: AnswerEvidence) -> str:
+        trends_by_metric: dict[str, list[TrendResult]] = {}
+        for trend in evidence.trends:
+            if (
+                trend.company_id == evidence.company_id
+                and trend.quality_status == "VALID"
+                and trend.from_value is not None
+                and trend.to_value is not None
+            ):
+                trends_by_metric.setdefault(trend.metric_name, []).append(trend)
+
+        grouped_metrics: dict[str, list[str]] = {}
+        metric_groups = {
+            "current_ratio": "Liquidity",
+            "quick_ratio": "Liquidity",
+            "operating_cash_flow_ratio": "Liquidity",
+            "debt_to_equity": "Leverage",
+            "debt_to_assets": "Leverage",
+            "interest_coverage": "Leverage",
+            "gross_margin": "Profitability",
+            "operating_margin": "Profitability",
+            "net_margin": "Profitability",
+            "roa": "Profitability",
+            "roe": "Profitability",
+            "dso": "Efficiency",
+            "inventory_days": "Efficiency",
+            "asset_turnover": "Efficiency",
+        }
+        for metric_name, trends in trends_by_metric.items():
+            ordered_trends = sorted(
+                trends,
+                key=lambda trend: (
+                    _period_sort_key(trend.from_period),
+                    _period_sort_key(trend.to_period),
+                ),
+            )
+            points: list[tuple[str, Decimal]] = []
+            if ordered_trends:
+                points.append(
+                    (ordered_trends[0].from_period, ordered_trends[0].from_value)
+                )
+                points.extend(
+                    (trend.to_period, trend.to_value)
+                    for trend in ordered_trends
+                )
+            if len(points) < 2:
+                continue
+
+            display_unit = _trend_display_unit(ordered_trends[0], evidence)
+            metrics_by_id = {
+                metric.metric_id: metric
+                for metric in evidence.computed_metrics
+                if metric.company_id == evidence.company_id
+            }
+            citations_by_period: dict[str, list[str]] = {}
+            for trend in ordered_trends:
+                for reference in trend.supporting_refs:
+                    metric = metrics_by_id.get(reference)
+                    if metric is None:
+                        continue
+                    citations_by_period.setdefault(metric.period, []).extend(
+                        self.citations.metric_citations(metric, evidence)
+                    )
+            formatted_points: list[str] = []
+            for period, value in points:
+                citations = list(dict.fromkeys(citations_by_period.get(period, [])))
+                if not citations:
+                    formatted_points = []
+                    break
+                formatted_points.append(
+                    f"  - {period}: {_format_metric_value(value, display_unit)} "
+                    f"{' '.join(citations)}"
+                )
+            if not formatted_points:
+                continue
+            directions = [
+                "increased" if trend.to_value > trend.from_value else (
+                    "decreased" if trend.to_value < trend.from_value else "was unchanged"
+                )
+                for trend in ordered_trends
+            ]
+            if len(set(directions)) == 1:
+                movement = {
+                    "increased": "increased in each period",
+                    "decreased": "decreased in each period",
+                    "was unchanged": "was unchanged in each period",
+                }[directions[0]]
+            else:
+                movement = "changed over the reporting periods"
+            statement = (
+                f"- {_humanize_label(metric_name)} {movement}:\n"
+                + "\n".join(formatted_points)
+            )
+            group = metric_groups.get(metric_name, "Other measures")
+            grouped_metrics.setdefault(group, []).append(statement)
+
+        if grouped_metrics:
+            sections = ["Financial trends by area:"]
+            group_order = (
+                "Liquidity",
+                "Profitability",
+                "Leverage",
+                "Efficiency",
+                "Other measures",
+            )
+            for group in group_order:
+                statements = grouped_metrics.get(group)
+                if statements:
+                    sections.append(
+                        f"- {group}:\n"
+                        + "\n".join(
+                            "\n".join(
+                                f"  {line}" for line in statement.splitlines()
+                            )
+                            for statement in statements
+                        )
+                    )
+            return "\n".join(sections)
+
+        if not evidence.trends:
+            valid_trends = []
+        else:
+            valid_trends = [
+                self._format_trend(trend, evidence)
+                for trend in evidence.trends
+                if trend.company_id == evidence.company_id
+                and trend.quality_status == "VALID"
+            ]
+            valid_trends = [statement for statement in valid_trends if statement]
+        if valid_trends:
+            return "Supported period-over-period changes: " + " ".join(
+                valid_trends
+            )
+        if len(set(evidence.periods)) < 2:
+            period = evidence.periods[0] if evidence.periods else "the available data"
+            return (
+                "I couldn't identify financial trends because the available "
+                f"evidence covers only {period}. Trends require comparable "
+                "figures from at least two reporting periods."
+            )
+        return (
+            "I couldn't establish financial trends because comparable "
+            "figures or required inputs were missing or incompatible "
+            "across the available periods."
+        )
+
+    def format_summary(self, evidence: AnswerEvidence, section: str) -> str:
+        """Create a concise evidence-only dashboard summary without figures."""
+        if section.casefold().replace("-", " ") == "red flags":
+            triggered = [
+                _label(flag.flag_type).lower()
+                for flag in evidence.red_flags
+                if flag.status == "TRIGGERED"
+            ]
+            not_triggered = [
+                _label(flag.flag_type).lower()
+                for flag in evidence.red_flags
+                if flag.status == "NOT_TRIGGERED"
+            ]
+            inconclusive = [
+                _label(flag.flag_type).lower()
+                for flag in evidence.red_flags
+                if flag.status == "INSUFFICIENT_EVIDENCE"
+            ]
+            statements = []
+            if triggered:
+                statements.append(
+                    "Configured indicators requiring review include "
+                    f"{_join_labels(triggered)}."
+                )
+            if not_triggered:
+                statements.append(
+                    "The configured checks not triggered are "
+                    f"{_join_labels(not_triggered)}."
+                )
+            if inconclusive:
+                statements.append(
+                    "The following checks are inconclusive because required "
+                    f"evidence is missing: {_join_labels(inconclusive)}."
+                )
+            if not statements:
+                statements.append(
+                    "No indicator results are available, so the evidence "
+                    "cannot establish whether configured checks triggered."
+                )
+            if evidence.red_flags:
+                statements.append(
+                    "A triggered indicator is a prompt for further review, "
+                    "not a conclusion."
+                )
+            return append_warnings(" ".join(statements), evidence)
+
+        available = [
+            _label(metric.metric_name).lower()
+            for metric in evidence.computed_metrics
+            if metric.company_id == evidence.company_id
+            and metric.quality_status == "VALID"
+            and metric.value is not None
+        ]
+        unavailable = [
+            metric
+            for metric in evidence.computed_metrics
+            if metric.company_id == evidence.company_id
+            and (metric.quality_status != "VALID" or metric.value is None)
+        ]
+        statements = []
+        section_name = section.lower()
+        if available:
+            statements.append(
+                f"Available {section_name} measures include "
+                f"{_join_labels(available)}."
+            )
+        else:
+            statements.append(
+                f"No {section_name} measures could be calculated from the "
+                "available evidence."
+            )
+        if unavailable:
+            missing = []
+            for metric in unavailable:
+                reasons = [
+                    warning.removeprefix("MISSING_INPUT:").replace("_", " ")
+                    for warning in metric.warnings
+                    if warning.startswith("MISSING_INPUT:")
+                ]
+                label = _label(metric.metric_name).lower()
+                if reasons:
+                    label += f" (missing {', '.join(reasons)})"
+                missing.append(label)
+            statements.append(
+                "The following measures are unavailable: "
+                f"{_join_labels(missing)}."
+            )
+        if evidence.trends:
+            directions = []
+            for trend in evidence.trends:
+                if (
+                    trend.company_id != evidence.company_id
+                    or trend.quality_status != "VALID"
+                    or trend.delta is None
+                ):
+                    continue
+                direction = "increased" if trend.delta > 0 else (
+                    "decreased" if trend.delta < 0 else "was unchanged"
+                )
+                directions.append(
+                    f"{_label(trend.metric_name).lower()} {direction}"
+                )
+            if directions:
+                statements.append(
+                    "The available period-over-period results show that "
+                    f"{_join_labels(directions)}."
+                )
+            else:
+                statements.append(
+                    "Period-over-period direction cannot be established from "
+                    "the available trend results."
+                )
+        else:
+            statements.append(
+                "No period-over-period trend evidence is included, so the "
+                "direction of change cannot be assessed."
+            )
+        return append_warnings(" ".join(statements), evidence)
 
     def format_comparison(
         self,
@@ -123,6 +460,57 @@ class SafeFallbackFormatter:
         if warning_codes:
             answer = f"{answer.rstrip()} Comparison warnings: {', '.join(warning_codes)}."
         return answer
+
+    @staticmethod
+    def format_comparison_summary(result: ComparisonResult) -> str:
+        """Summarize comparison coverage without restating numeric values."""
+        if result.status == "INSUFFICIENT_EVIDENCE":
+            return (
+                "Required company evidence is missing, so no comparison can "
+                "be established."
+            )
+
+        comparable = [
+            _label(metric.metric_name).lower()
+            for metric in result.metrics
+            if metric.comparison_status == "COMPARABLE"
+        ]
+        incomparable = [
+            _label(metric.metric_name).lower()
+            for metric in result.metrics
+            if metric.comparison_status == "INCOMPARABLE"
+        ]
+        missing = [
+            _label(metric.metric_name).lower()
+            for metric in result.metrics
+            if metric.comparison_status == "INSUFFICIENT_EVIDENCE"
+        ]
+        statements = []
+        if comparable:
+            statements.append(
+                "Comparable measures include "
+                f"{_join_labels(comparable)}."
+            )
+        if incomparable:
+            statements.append(
+                "The following measures are not comparable: "
+                f"{_join_labels(incomparable)}."
+            )
+        if missing:
+            statements.append(
+                "A comparison could not be completed for "
+                f"{_join_labels(missing)} because evidence is missing."
+            )
+        if not statements:
+            statements.append("No comparable results are available.")
+        warning_codes = list(dict.fromkeys(
+            warning.code for warning in result.warnings
+        ))
+        if warning_codes:
+            statements.append(
+                "Comparison warnings: " + ", ".join(warning_codes) + "."
+            )
+        return " ".join(statements)
 
     @staticmethod
     def _format_comparison_value(
@@ -167,11 +555,11 @@ class SafeFallbackFormatter:
 
     def _format_fact(self, fact: FinancialFact) -> str:
         citation = self.citations.fact_citation(fact)
-        amount = _format_fact_value(fact)
+        amount = _format_fact_amount(fact)
         label = _label(fact.canonical_line_item)
         return (
             f"Reported {label} for {fact.fiscal_year} was {amount} "
-            f"(unit: {fact.unit}) {citation}."
+            f"{citation}."
         )
 
     def _format_metric(self, metric: ComputedMetric, evidence: AnswerEvidence) -> str:
@@ -254,12 +642,31 @@ def append_warnings(answer: str, evidence: AnswerEvidence) -> str:
 
 
 def _format_fact_value(fact: FinancialFact) -> str:
-    number = _format_decimal(fact.value)
+    number = _format_decimal(abs(fact.value))
     symbol = CURRENCY_SYMBOLS.get(fact.currency or "")
     currency = fact.currency or "currency not specified"
+    sign = "-" if fact.value < 0 else ""
     if symbol:
-        return f"{symbol}{number}"
-    return f"{number} {currency}"
+        return f"{sign}{symbol}{number}"
+    return f"{sign}{number} {currency}"
+
+
+def _format_fact_amount(fact: FinancialFact) -> str:
+    amount = _format_fact_value(fact)
+    unit = fact.unit.strip().casefold()
+    unit_names = {
+        "million": "million",
+        "millions": "million",
+        "thousand": "thousand",
+        "thousands": "thousand",
+        "billion": "billion",
+        "billions": "billion",
+    }
+    if unit in unit_names:
+        return f"{amount} {unit_names[unit]}"
+    if unit not in {"", "absolute", "unit", "units", "currency"}:
+        return f"{amount} ({fact.unit})"
+    return amount
 
 
 def _format_metric_value(value: Decimal, display_unit: str) -> str:
@@ -291,9 +698,49 @@ def _label(value: str) -> str:
     return value.replace("_", " ").strip().title()
 
 
+def _humanize_label(value: str) -> str:
+    label = _label(value)
+    for word in ("Of", "And", "From", "For", "In"):
+        label = label.replace(f" {word} ", f" {word.lower()} ")
+    return label
+
+
+def _statement_label(statement_type: str) -> str:
+    labels = {
+        "income_statement": "income statement",
+        "balance_sheet": "balance sheet",
+        "cash_flow_statement": "cash flow statement",
+    }
+    return labels.get(statement_type, statement_type.replace("_", " "))
+
+
+def _period_sort_key(period: str) -> tuple[int, str]:
+    match = re.search(r"\d{4}", period)
+    return (int(match.group(0)) if match else -1, period)
+
+
+def _join_labels(labels: list[str]) -> str:
+    if len(labels) < 2:
+        return labels[0] if labels else ""
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return f"{', '.join(labels[:-1])}, and {labels[-1]}"
+
+
 def _is_comparison_question(question: str) -> bool:
     return bool(
         re.search(r"\b(compare|comparison|versus|vs\.?)\b", question, re.IGNORECASE)
+    )
+
+
+def _is_trend_question(question: str) -> bool:
+    return bool(
+        re.search(
+            r"\b(trend\w*|declin\w*|increas\w*|decreas\w*|change\w*|"
+            r"over time|period.over.period)\b",
+            question,
+            re.IGNORECASE,
+        )
     )
 
 
